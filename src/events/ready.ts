@@ -6,6 +6,7 @@ export default defineEvent({
   once: true,
   async execute(services, client) {
     services.audit.attach(client);
+    services.eventSync.attach(client);
     client.user.setPresence({ activities: [{ name: 'Hong Kong 1941', type: ActivityType.Watching }], status: 'online' });
     services.logger.info(
       { user: client.user.tag, servers: client.guilds.cache.size, commands: services.commands.size },
@@ -24,5 +25,6 @@ export default defineEvent({
         services.logger.error({ err }, 'could not register the slash commands; run npm run deploy-commands');
       }
     }
+    services.eventSync.start();
   },
 });

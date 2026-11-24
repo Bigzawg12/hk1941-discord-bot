@@ -1,5 +1,6 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import type { AnnounceState } from '../sync/eventPlan.js';
 
 export type StaffTier = 1 | 2 | 3 | 4 | 5;
 
@@ -15,6 +16,18 @@ export interface GuildSettings {
   auditChannelId?: string;
   /** role given here after /link verify */
   verifiedRoleId?: string;
+  /** mirror in-game events to and from this server's Events tab (default on) */
+  eventSync?: boolean;
+  /** channel with the event calendar and the event announcements */
+  eventChannelId?: string;
+  /** role pinged by the "starting soon" reminder */
+  eventPingRoleId?: string;
+  /** the calendar message the bot keeps editing */
+  calendarMessageId?: string;
+  /** which events have been announced here */
+  eventState?: AnnounceState;
+  /** in-game events this server removed from its Events tab without cancelling them in game */
+  skipEventIds?: string[];
   updatedAt?: number;
   updatedBy?: string;
 }

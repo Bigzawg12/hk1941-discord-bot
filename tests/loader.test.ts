@@ -65,7 +65,7 @@ describe('event loader', () => {
     const { services } = testServices([]);
     const client = new EventEmitter() as unknown as Client;
     const names = await loadEvents(client, services);
-    expect(names.sort()).toEqual(['clientReady (once)', 'error', 'guildCreate', 'interactionCreate', 'warn']);
+    expect(names.sort()).toEqual(['clientReady (once)', 'error', 'guildCreate', 'guildScheduledEventCreate', 'guildScheduledEventDelete', 'guildScheduledEventUpdate', 'interactionCreate', 'warn']);
     expect((client as unknown as EventEmitter).listenerCount('interactionCreate')).toBe(1);
   });
 });

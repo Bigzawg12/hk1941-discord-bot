@@ -198,3 +198,27 @@ describe('/setup', () => {
     expect((await services.guilds.get(IDS.guild)).auditChannelId).toBe('121212121212121212');
   });
 });
+
+describe('/setup events', () => {
+  it('sets the event channel and starts the calendar fresh', async () => {
+    const { services } = await setup([], { OWNER_DISCORD_IDS: IDS.staffUser });
+    await services.guilds.update(IDS.guild, 't', (s) => {
+      s.calendarMessageId = 'old';
+      s.eventState = { seen: ['1'], stage: {} };
+    });
+    const { interaction, replies } = fakeInteraction({ commandName: 'setup', sub: 'event-channel', channels: { channel: { id: '131313131313131313' } } });
+    await handleInteraction(services, interaction as unknown as Interaction);
+    expect(replyText(replies.at(-1))).toMatch(/calendar will appear in <#131313131313131313>/);
+    const s = await services.guilds.get(IDS.guild);
+    expect(s.eventChannelId).toBe('131313131313131313');
+    expect(s.calendarMessageId).toBeUndefined();
+    expect(s.eventState).toBeUndefined();
+  });
+
+  it('turns sync off for one server', async () => {
+    const { services } = await setup([], { OWNER_DISCORD_IDS: IDS.staffUser });
+    const { interaction } = fakeInteraction({ commandName: 'setup', sub: 'event-sync', booleans: { on: false } });
+    await handleInteraction(services, interaction as unknown as Interaction);
+    expect((await services.guilds.get(IDS.guild)).eventSync).toBe(false);
+  });
+});

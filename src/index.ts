@@ -23,12 +23,16 @@ async function main(): Promise<void> {
   services.commands = await loadCommands();
 
   // Slash commands only: no privileged intents needed (member roles come with each interaction).
-  const client = new Client({ intents: [GatewayIntentBits.Guilds], partials: [Partials.GuildMember] });
+  const client = new Client({
+    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildScheduledEvents],
+    partials: [Partials.GuildMember, Partials.GuildScheduledEvent],
+  });
   const events = await loadEvents(client, services);
   logger.info({ commands: [...services.commands.keys()], events }, 'loaded');
 
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'shutting down');
+    services.eventSync.stop();
     await client.destroy();
     process.exit(0);
   };

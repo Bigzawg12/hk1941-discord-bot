@@ -1,9 +1,4 @@
-import {
-  GuildScheduledEventEntityType,
-  GuildScheduledEventPrivacyLevel,
-  InteractionContextType,
-  SlashCommandBuilder,
-} from 'discord.js';
+import { InteractionContextType, SlashCommandBuilder } from 'discord.js';
 import { eventsEmbed } from '../discord/embeds.js';
 import { runLiveAction } from '../discord/liveAction.js';
 import { Tier } from '../permissions/tiers.js';
@@ -52,6 +47,7 @@ export default defineCommand({
       if (!/^\d{1,8}$/.test(eventId)) throw new UserFacingError('Event ids are numbers, e.g. 4821.');
       const r = await runLiveAction(ctx, 'event_cancel', { eventId }, { label: `Cancel event #${eventId}` });
       services.global.invalidate('HK1941_Events', 'list');
+      if (r.ok) services.eventSync.syncSoon();
       await interaction.editReply(r.text);
       return;
     }
@@ -72,25 +68,8 @@ export default defineCommand({
     });
     services.global.invalidate('HK1941_Events', 'list');
 
-    let discordEvent = '';
-    if (r.ok && services.config.events.createDiscordEvents && interaction.guild) {
-      try {
-        await interaction.guild.scheduledEvents.create({
-          name: title,
-          description: detail || undefined,
-          scheduledStartTime: new Date(start * 1000),
-          scheduledEndTime: new Date((start + 2 * 3600) * 1000),
-          privacyLevel: GuildScheduledEventPrivacyLevel.GuildOnly,
-          entityType: GuildScheduledEventEntityType.External,
-          entityMetadata: { location: 'Hong Kong 1941 (Roblox)' },
-        });
-        discordEvent = '\nAlso added to the server\'s Discord events.';
-      } catch (err) {
-        ctx.logger.warn({ err }, 'could not create the Discord scheduled event');
-        discordEvent = '\n(Could not add a Discord event: the bot needs the Manage Events permission.)';
-      }
-    }
+    if (r.ok) services.eventSync.syncSoon(); // Events tabs and calendars pick it up
     const id = r.eventId ? ` #${r.eventId}` : '';
-    await interaction.editReply(`🗓️ Event${id} **${title}** at ${discordTime(start, 'F')} (${discordTime(start, 'R')}).\n${r.text}${discordEvent}`);
+    await interaction.editReply(`🗓️ Event${id} **${title}** at ${discordTime(start, 'F')} (${discordTime(start, 'R')}).\n${r.text}`);
   },
 });

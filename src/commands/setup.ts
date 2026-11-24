@@ -18,7 +18,7 @@ const TIER_CHOICES = ([0, 1, 2, 3, 4, 5] as const).map((t) => ({ name: t === 0 ?
 export default defineCommand({
   tier: Tier.Administrator,
   subTiers: { show: Tier.TrialModerator },
-  help: "This server's staff roles, audit channel and verified role.",
+  help: "This server's staff roles, audit channel, verified role and event calendar.",
   data: new SlashCommandBuilder()
     .setName('setup')
     .setDescription("Set up the bot for this server")
@@ -42,6 +42,24 @@ export default defineCommand({
         .setName('verified-role')
         .setDescription('Role given after /link verify (leave empty to turn off)')
         .addRoleOption((o) => o.setName('role').setDescription('Discord role')),
+    )
+    .addSubcommand((s) =>
+      s
+        .setName('event-channel')
+        .setDescription('Channel for the event calendar and event announcements (leave empty to turn off)')
+        .addChannelOption((o) => o.setName('channel').setDescription('Text channel').addChannelTypes(ChannelType.GuildText, ChannelType.GuildAnnouncement)),
+    )
+    .addSubcommand((s) =>
+      s
+        .setName('event-ping')
+        .setDescription('Role pinged when an event is about to start (leave empty for no ping)')
+        .addRoleOption((o) => o.setName('role').setDescription('Discord role')),
+    )
+    .addSubcommand((s) =>
+      s
+        .setName('event-sync')
+        .setDescription("Mirror in-game events to and from this server's Events tab and event channel")
+        .addBooleanOption((o) => o.setName('on').setDescription('On or off').setRequired(true)),
     ),
 
   async execute(ctx) {
@@ -65,6 +83,14 @@ export default defineCommand({
           { name: 'Staff roles', value: roles.join('\n') || 'None yet. Use /setup staff-role.' },
           { name: 'Audit channel', value: s.auditChannelId ? `<#${s.auditChannelId}>` : 'Off' },
           { name: 'Verified role', value: s.verifiedRoleId ? `<@&${s.verifiedRoleId}>` : 'Off' },
+          {
+            name: 'Events',
+            value: [
+              `Sync with the game: ${s.eventSync === false ? 'off' : 'on'}`,
+              `Calendar channel: ${s.eventChannelId ? `<#${s.eventChannelId}>` : 'off'}`,
+              `Reminder ping: ${s.eventPingRoleId ? `<@&${s.eventPingRoleId}>` : 'none'}`,
+            ].join('\n'),
+          },
           {
             name: 'Also counted everywhere',
             value: 'Owner list and TIERn_ROLE_IDS from the bot config, and staff army ranks of linked Roblox accounts.',
@@ -138,6 +164,65 @@ export default defineCommand({
       await interaction.reply({
         content: role ? `✅ Members get <@&${role.id}> after /link verify.${note}` : '✅ Verified role turned off.',
         allowedMentions: { parse: [] },
+        ...ephemeral,
+      });
+      return;
+    }
+
+    if (sub === 'event-channel') {
+      const picked = interaction.options.getChannel('channel');
+      if (picked) {
+        const ch = await interaction.client.channels.fetch(picked.id).catch(() => null);
+        if (!ch?.isSendable()) {
+          throw new UserFacingError(`I can't post in <#${picked.id}>. Give me View Channel, Send Messages, Embed Links and Read Message History there.`);
+        }
+      }
+      await services.guilds.update(guildId, interaction.user.username, (s) => {
+        if (picked) s.eventChannelId = picked.id;
+        else delete s.eventChannelId;
+        delete s.calendarMessageId;
+        delete s.eventState; // start fresh: old events aren't re-announced
+      });
+      services.eventSync.resetChannel(guildId);
+      services.eventSync.syncSoon(1000);
+      await audit('Event channel changed', picked ? `Now <#${picked.id}>` : 'Turned off');
+      await interaction.reply({
+        content: picked
+          ? `✅ The event calendar will appear in <#${picked.id}> in a moment, with posts for new events, a reminder before each starts, and "starting now".`
+          : '✅ Event calendar turned off.',
+        ...ephemeral,
+      });
+      return;
+    }
+
+    if (sub === 'event-ping') {
+      const role = interaction.options.getRole('role');
+      if (role && role.managed) throw new UserFacingError('That role belongs to a bot or integration; pick a normal role.');
+      await services.guilds.update(guildId, interaction.user.username, (s) => {
+        if (role) s.eventPingRoleId = role.id;
+        else delete s.eventPingRoleId;
+      });
+      await audit('Event ping changed', role ? `Now ${esc(role.name)} (${role.id})` : 'No ping');
+      const note = role && !(role as { mentionable?: boolean }).mentionable ? '\n⚠️ Turn on "Allow anyone to @mention this role" for it, or the ping will not go out.' : '';
+      await interaction.reply({
+        content: role ? `✅ <@&${role.id}> is pinged ${services.config.events.remindMinutes} minutes before each event.${note}` : '✅ No reminder ping.',
+        allowedMentions: { parse: [] },
+        ...ephemeral,
+      });
+      return;
+    }
+
+    if (sub === 'event-sync') {
+      const on = interaction.options.getBoolean('on', true);
+      await services.guilds.update(guildId, interaction.user.username, (s) => {
+        s.eventSync = on;
+      });
+      if (on) services.eventSync.syncSoon(1000);
+      await audit('Event sync changed', on ? 'On' : 'Off');
+      await interaction.reply({
+        content: on
+          ? "✅ In-game events now show in this server's Events tab, and staff events made there go into the game."
+          : "✅ Event sync is off here. Existing Discord events stay; nothing new is added or cancelled.",
         ...ephemeral,
       });
       return;

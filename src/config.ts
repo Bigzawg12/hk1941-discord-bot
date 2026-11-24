@@ -58,7 +58,12 @@ export interface BotConfig {
     codeTtlMinutes: number;
   };
   events: {
-    createDiscordEvents: boolean;
+    /** keep in-game events, each server's Events tab and its event channel in step */
+    sync: boolean;
+    syncSeconds: number;
+    remindMinutes: number;
+    /** how long a Discord event lasts (in-game events have no end time) */
+    lengthMinutes: number;
   };
   eligible: {
     maxProfiles: number;
@@ -192,7 +197,10 @@ const schema = z.object({
   ROVER_API_KEY: optionalString,
   LINK_CODE_TTL_MIN: positiveInt(15),
 
-  DISCORD_EVENTS: bool(false),
+  EVENT_SYNC: bool(true),
+  EVENT_SYNC_SEC: positiveInt(60),
+  EVENT_REMIND_MIN: positiveInt(15),
+  EVENT_LENGTH_MIN: positiveInt(120),
   ELIGIBLE_MAX_PROFILES: positiveInt(300),
   ELIGIBLE_CACHE_MIN: positiveInt(10),
 
@@ -272,7 +280,12 @@ export function loadConfig(env: Env, mode: ConfigMode = 'bot'): BotConfig {
       roverApiKey: e.ROVER_API_KEY,
       codeTtlMinutes: e.LINK_CODE_TTL_MIN,
     },
-    events: { createDiscordEvents: e.DISCORD_EVENTS },
+    events: {
+      sync: e.EVENT_SYNC,
+      syncSeconds: Math.max(30, e.EVENT_SYNC_SEC),
+      remindMinutes: e.EVENT_REMIND_MIN,
+      lengthMinutes: e.EVENT_LENGTH_MIN,
+    },
     eligible: { maxProfiles: e.ELIGIBLE_MAX_PROFILES, cacheMinutes: e.ELIGIBLE_CACHE_MIN },
     dataDir: e.DATA_DIR,
     log: { level: e.LOG_LEVEL, pretty: e.LOG_PRETTY },

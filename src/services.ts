@@ -17,6 +17,7 @@ import { MessagingPublisher } from './roblox/messaging.js';
 import { ProfileReader } from './roblox/profiles.js';
 import { ServerDirectory } from './roblox/servers.js';
 import { UsersClient } from './roblox/users.js';
+import { EventSync } from './sync/eventSync.js';
 import type { Services } from './types.js';
 
 export interface ServiceOverrides {
@@ -53,7 +54,7 @@ export function createServices(config: BotConfig, logger: Logger, overrides: Ser
 
   const nowSec = overrides.now ? () => Math.floor(overrides.now!() / 1000) : undefined;
 
-  return {
+  const services: Services = {
     config,
     logger,
     users,
@@ -81,5 +82,8 @@ export function createServices(config: BotConfig, logger: Logger, overrides: Ser
     audit: new AuditLog(logger, config.discord.auditChannelId, guilds),
     guilds,
     commands: new Map(),
+    eventSync: undefined as unknown as EventSync, // set just below: it needs the finished services
   };
+  services.eventSync = new EventSync(services, nowSec);
+  return services;
 }

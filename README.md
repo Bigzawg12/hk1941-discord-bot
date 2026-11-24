@@ -18,7 +18,7 @@ A Discord bot for the staff of **Hong Kong 1941**, the Canada 1940s group's WW2 
 | `/medals [user] [member]` | 0 | Medals (with citations) and qualification tabs. |
 | `/status [names]` | 0 | Live servers and player counts. With the bridge installed, it also shows uptime and objectives; staff can see player names. |
 | `/event list` | 0 | The same event list as `;events` in game. |
-| `/event schedule when title [detail]` | 2 | Posts an event to the in-game list. HKAdmin announces it 15 minutes before and when it starts. |
+| `/event schedule when title [detail]` | 2 | Posts an event to the in-game list. HKAdmin announces it 15 minutes before and when it starts. It also appears in every server's Events tab and calendar. |
 | `/event cancel id` | 2 | Cancels an event. |
 | `/link start / verify / status / remove` | 0 | Links your Discord account to your Roblox account. |
 | `/link whois [member] [user]` | 1 | Looks up a link in either direction. |
@@ -55,11 +55,29 @@ The bot works in every server it's in, with no server ID in `.env`. Its commands
 - `/setup staff-role role tier`: give a role a tier in that server (`None` removes it).
 - `/setup audit-channel [channel]`: where that server's staff actions are posted. The bot posts a test message first.
 - `/setup verified-role [role]`: the role given after `/link verify`.
+- `/setup event-channel [channel]`: the server's event calendar and announcements (see [Events](#events)).
+- `/setup event-ping [role]`: role pinged before each event starts.
+- `/setup event-sync on`: turn event syncing on or off for that server (on by default).
 - `/setup show`: the current settings.
 
 `/setup` needs tier 4 (Administrator), and you can only give tiers **below your own** (owners can give any). Discord permissions don't count: a server admin who adds the bot can't make themselves game staff. The first person to set up a server needs tier 4 or 5 from `OWNER_DISCORD_IDS`, `TIER4/5_ROLE_IDS`, or the army rank of their linked Roblox account.
 
 Account links are per person, not per server, so someone linked in one server is linked in all of them.
+
+### Events
+
+In-game events and Discord stay in step in every server, checked every minute (`EVENT_SYNC_SEC`):
+
+- **Game to Discord:** every upcoming in-game event, however it was made (`/event schedule`, `;event add` or the Events tab), appears in each server's **Events** tab. When it's cancelled in game, or finishes (3 hours after the start, like HKAdmin), it's removed. The Discord copy is linked by the `· #1234` at the end of its location; leave that on.
+- **Calendar channel:** with `/setup event-channel`, the bot keeps one calendar message there, listing every upcoming event in each reader's own time zone, with a **Join Hong Kong 1941** button. It also posts:
+  - when a new event is added;
+  - a reminder `EVENT_REMIND_MIN` (15) minutes before it starts, pinging the `/setup event-ping` role (make that role mentionable);
+  - "starting now" when it starts.
+  The first time, it only posts the calendar, not announcements for events that already existed.
+- **Discord to game:** when staff create an event in a server's Events tab (location type **Somewhere else**), it's added to the game, with the same rule as `/event schedule`: tier 2+ and a linked Roblox account. A live game server must be running, and `BRIDGE_ACKS=true`. Voice and stage-channel events stay Discord-only.
+- **Cancelling in Discord:** if staff who can cancel events (tier 2+, linked) cancel or delete a synced event, it's cancelled in game, and so in every server. If anyone else removes it, it's only hidden in that server. This needs the bot to have **View Audit Log** to see who did it.
+
+The bot needs **Create Events** and **Manage Events** for the Events tab. In the calendar channel, it needs View Channel, Send Messages, Embed Links and Read Message History. Turn all of it off with `EVENT_SYNC=false`.
 
 To change a command's tier, use `COMMAND_TIERS` (for example `announce:2,event.schedule:3`). The game checks again: `MIN_TIER` at the top of the bridge script is the final say, so lower it there too.
 
@@ -99,7 +117,7 @@ You need: Node.js 20 or newer (or Docker), a Discord server or servers where you
 2. On **General Information**, copy the **Application ID**. It goes in `DISCORD_CLIENT_ID`.
 3. On **Bot**, click **Reset Token** and copy the token into `DISCORD_TOKEN`. Keep it secret. Leave all three *Privileged Gateway Intents* off; the bot doesn't need them.
 4. On **Bot**, turn **Public Bot** off, so only you can add it to servers.
-5. On **OAuth2 → URL Generator**, tick the scopes `bot` and `applications.commands`. Then tick these bot permissions: **View Channels**, **Send Messages**, **Embed Links**. Add **Manage Roles** if you'll use a verified role, and **Manage Events** if you use `DISCORD_EVENTS=true`. Open the generated URL to add the bot to a server; use the same URL for every other server.
+5. On **OAuth2 → URL Generator**, tick the scopes `bot` and `applications.commands`. Then tick these bot permissions: **View Channels**, **Send Messages**, **Embed Links**, **Read Message History**, **View Audit Log**, **Manage Roles**, **Create Events** and **Manage Events**. Open the generated URL to add the bot to a server; use the same URL for every other server. Or use this link with your Application ID in place of `APP_ID`: `https://discord.com/oauth2/authorize?client_id=APP_ID&scope=bot+applications.commands&permissions=17601044499584`.
 6. After it starts, run `/setup` in each server (see [Any server](#any-server)). If you use a verified role, drag the bot's role **above** it in Server Settings → Roles.
 
 ### 2. Create the Roblox Open Cloud API key

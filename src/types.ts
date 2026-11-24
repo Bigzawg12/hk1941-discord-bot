@@ -18,6 +18,7 @@ import type { GroupsClient } from './roblox/groups.js';
 import type { ProfileReader } from './roblox/profiles.js';
 import type { ServerDirectory } from './roblox/servers.js';
 import type { UsersClient } from './roblox/users.js';
+import type { EventSync } from './sync/eventSync.js';
 
 /** Everything a command can use. Built once in services.ts; tests build their own with mocks. */
 export interface Services {
@@ -34,6 +35,8 @@ export interface Services {
   audit: AuditLog;
   /** per-server settings from /setup */
   guilds: GuildSettingsStore;
+  /** in-game events <-> Discord Events tab and event channels */
+  eventSync: EventSync;
   /** filled in by the loader */
   commands: Map<string, Command>;
 }
