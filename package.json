@@ -1,0 +1,35 @@
+{
+  "name": "hk1941-discord-bot",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Staff bot for the Roblox game Hong Kong 1941 (Canada 1940s group): service records, moderation and promotions through Roblox Open Cloud.",
+  "type": "module",
+  "main": "dist/index.js",
+  "engines": {
+    "node": ">=20.11"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/index.js",
+    "dev": "tsx watch src/index.ts",
+    "deploy-commands": "node dist/deploy-commands.js",
+    "deploy-commands:dev": "tsx src/deploy-commands.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\""
+  },
+  "dependencies": {
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "pino": "^9.5.0",
+    "pino-pretty": "^13.0.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^3.0.5"
+  }
+}
