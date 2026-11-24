@@ -72,8 +72,15 @@ describe('loadConfig', () => {
     expect(c.roblox.apiKey).toBeUndefined();
   });
 
-  it('needs a guild and key for Bloxlink', () => {
-    expect(() => loadConfig({ ...BASE_ENV, LINK_PROVIDER: 'bloxlink', DISCORD_GUILD_ID: '' })).toThrow(/BLOXLINK_API_KEY[\s\S]*DISCORD_GUILD_ID/);
+  it('needs a key for Bloxlink, but no server ID', () => {
+    expect(() => loadConfig({ ...BASE_ENV, LINK_PROVIDER: 'bloxlink' })).toThrow(/BLOXLINK_API_KEY/);
+    expect(loadConfig({ ...BASE_ENV, LINK_PROVIDER: 'bloxlink', BLOXLINK_API_KEY: 'k' }).linking.provider).toBe('bloxlink');
+  });
+
+  it('works in any server: no server ID setting, commands registered globally by default', () => {
+    const c = loadConfig({ ...BASE_ENV, DISCORD_GUILD_ID: '222222222222222222' });
+    expect('guildId' in c.discord).toBe(false);
+    expect(c.discord.registerCommands).toBe(true);
   });
 
   it('refuses to start with no way to recognise staff', () => {

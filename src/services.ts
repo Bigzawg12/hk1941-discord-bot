@@ -2,6 +2,7 @@ import { join } from 'node:path';
 import { BridgeClient } from './bridge/client.js';
 import type { BotConfig } from './config.js';
 import { AuditLog } from './discord/audit.js';
+import { JsonFileGuildSettingsStore, type GuildSettingsStore } from './guilds/settings.js';
 import { BloxlinkProvider, RoVerProvider, type ExternalLinkProvider } from './linking/providers.js';
 import { LinkService } from './linking/service.js';
 import { JsonFileLinkStore, type LinkStore } from './linking/store.js';
@@ -21,6 +22,7 @@ import type { Services } from './types.js';
 export interface ServiceOverrides {
   fetch?: FetchLike;
   linkStore?: LinkStore;
+  guildStore?: GuildSettingsStore;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -46,6 +48,8 @@ export function createServices(config: BotConfig, logger: Logger, overrides: Ser
     codeTtlMinutes: config.linking.codeTtlMinutes,
     now: overrides.now,
   });
+
+  const guilds = overrides.guildStore ?? new JsonFileGuildSettingsStore(join(config.dataDir, 'guilds.json'), overrides.now);
 
   const nowSec = overrides.now ? () => Math.floor(overrides.now!() / 1000) : undefined;
 
@@ -73,8 +77,9 @@ export function createServices(config: BotConfig, logger: Logger, overrides: Ser
       now: overrides.now,
     }),
     links,
-    permissions: new PermissionResolver(config, { links, groups, logger }),
-    audit: new AuditLog(logger, config.discord.auditChannelId),
+    permissions: new PermissionResolver(config, { links, groups, guilds, logger }),
+    audit: new AuditLog(logger, config.discord.auditChannelId, guilds),
+    guilds,
     commands: new Map(),
   };
 }

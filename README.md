@@ -34,18 +34,32 @@ A Discord bot for the staff of **Hong Kong 1941**, the Canada 1940s group's WW2 
 | `/announce message` | 4 | Shows an announcement on every live server (like `;gannounce`). |
 | `/promote user rank [reason]` | 4 | Changes a soldier's army group rank. It shows their points standing and asks you to confirm first. |
 | `/help` | 0 | The commands you can use, your tier and your link. |
+| `/setup show` · `staff-role` · `audit-channel` · `verified-role` | 1 / 4 | This server's staff roles, audit channel and verified role. |
 
 `user` accepts a Roblox username, `@name`, user ID or profile link. `member` takes a Discord member and uses their linked account.
 
-**Actions in the game need a linked Roblox account.** The game filters staff text (announcements, reasons, citations, event titles) under that account, as Roblox requires, and logs the action as that person. Every staff action is also posted to `AUDIT_CHANNEL_ID` and written to HKAdmin's own log, so `;logs` in game shows it.
+**Actions in the game need a linked Roblox account.** The game filters staff text (announcements, reasons, citations, event titles) under that account, as Roblox requires, and logs the action as that person. Every staff action is also posted to the server's `/setup audit-channel` (and `AUDIT_CHANNEL_ID`, if set) and written to HKAdmin's own log, so `;logs` in game shows it.
 
 ### Tiers
 
 These are the same numbers as `ServerStorage.HKAdminConfig`: **1** Trial Moderator, **2** Moderator, **3** Senior Moderator, **4** Administrator, **5** Owner. A member's tier is the highest of:
 
-- their Discord roles (`TIER1_ROLE_IDS` … `TIER5_ROLE_IDS`);
+- their Discord roles: the ones this server mapped with `/setup staff-role`, and `TIER1_ROLE_IDS` … `TIER5_ROLE_IDS` from `.env`;
 - `OWNER_DISCORD_IDS`;
 - if `TIER_FROM_ROBLOX_RANK=true`, their linked account's army rank, exactly as in game (rank 5 → 1, 9 → 2, 11 → 3, 13 → 4) or owner rank (255) in group 668236881 → 5.
+
+### Any server
+
+The bot works in every server it's in, with no server ID in `.env`. Its commands are registered globally each time it starts. Each server sets itself up with `/setup`, and the settings are saved in `DATA_DIR/guilds.json`:
+
+- `/setup staff-role role tier`: give a role a tier in that server (`None` removes it).
+- `/setup audit-channel [channel]`: where that server's staff actions are posted. The bot posts a test message first.
+- `/setup verified-role [role]`: the role given after `/link verify`.
+- `/setup show`: the current settings.
+
+`/setup` needs tier 4 (Administrator), and you can only give tiers **below your own** (owners can give any). Discord permissions don't count: a server admin who adds the bot can't make themselves game staff. The first person to set up a server needs tier 4 or 5 from `OWNER_DISCORD_IDS`, `TIER4/5_ROLE_IDS`, or the army rank of their linked Roblox account.
+
+Account links are per person, not per server, so someone linked in one server is linked in all of them.
 
 To change a command's tier, use `COMMAND_TIERS` (for example `announce:2,event.schedule:3`). The game checks again: `MIN_TIER` at the top of the bridge script is the final say, so lower it there too.
 
@@ -77,16 +91,16 @@ The message format is documented at the top of `roblox/DiscordBridge.server.luau
 
 ## Deploying
 
-You need: Node.js 20 or newer (or Docker), a Discord server where you can add bots, and edit access to the Hong Kong 1941 experience.
+You need: Node.js 20 or newer (or Docker), a Discord server or servers where you can add bots, and edit access to the Hong Kong 1941 experience.
 
 ### 1. Create the Discord application
 
 1. Go to <https://discord.com/developers/applications> → **New Application** (for example "HK1941 Staff").
 2. On **General Information**, copy the **Application ID**. It goes in `DISCORD_CLIENT_ID`.
 3. On **Bot**, click **Reset Token** and copy the token into `DISCORD_TOKEN`. Keep it secret. Leave all three *Privileged Gateway Intents* off; the bot doesn't need them.
-4. On **OAuth2 → URL Generator**, tick the scopes `bot` and `applications.commands`. Then tick these bot permissions: **View Channels**, **Send Messages**, **Embed Links**. Add **Manage Roles** if you use `VERIFIED_ROLE_ID`, and **Manage Events** if you use `DISCORD_EVENTS=true`. Open the generated URL and add the bot to your server.
-5. In Discord, turn on **Settings → Advanced → Developer Mode**. Then right-click to copy your server ID (`DISCORD_GUILD_ID`), your staff role IDs (`TIERn_ROLE_IDS`) and, optionally, an audit channel ID (`AUDIT_CHANNEL_ID`).
-6. If you use a verified role, drag the bot's role **above** it in Server Settings → Roles.
+4. On **Bot**, turn **Public Bot** off, so only you can add it to servers.
+5. On **OAuth2 → URL Generator**, tick the scopes `bot` and `applications.commands`. Then tick these bot permissions: **View Channels**, **Send Messages**, **Embed Links**. Add **Manage Roles** if you'll use a verified role, and **Manage Events** if you use `DISCORD_EVENTS=true`. Open the generated URL to add the bot to a server; use the same URL for every other server.
+6. After it starts, run `/setup` in each server (see [Any server](#any-server)). If you use a verified role, drag the bot's role **above** it in Server Settings → Roles.
 
 ### 2. Create the Roblox Open Cloud API key
 
@@ -101,7 +115,7 @@ Make a key just for the bot: <https://create.roblox.com/dashboard/credentials> �
 
 - **Accepted IP addresses:** add your bot host's public IP. `0.0.0.0/0` allows any IP; use it only while testing.
 - **Expiration:** pick one and put a reminder in your calendar. When the key expires, the bot stops reading.
-- **Groups:** Open Cloud uses the **key owner's** permissions in group 409406376. Create the key on an account that's allowed to change ranks there, below its own rank.
+- **User key, not group key.** The game belongs to group 668236881, but `/promote` changes ranks in group 409406376. A group key only reaches its own group, so make the key on a user account. Best is a separate bot account that has a rank in 409406376 allowed to change ranks (it can only give ranks below its own), and a role in 668236881 allowed to edit group experiences.
 - Don't give it DataStore *write*, *delete* or *list* permissions. The bot never needs them.
 - Put the key in `HK_OPEN_CLOUD_KEY`. The bot never reads `ROBLOX_OPEN_CLOUD_API_KEY`, so a personal key on the same machine can't be picked up by mistake.
 
@@ -125,7 +139,7 @@ If you change `BRIDGE_TOPIC`, `BRIDGE_ACK_MAP` or `SERVER_MAP` in `.env`, change
 Copy-Item .env.example .env
 ```
 
-Fill in `.env`. At minimum you need `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `DISCORD_GUILD_ID`, `HK_OPEN_CLOUD_KEY` and your staff roles. Every variable is explained in `.env.example`. The bot checks the whole file on start and lists every problem at once.
+Fill in `.env`. At minimum you need `DISCORD_TOKEN`, `DISCORD_CLIENT_ID`, `HK_OPEN_CLOUD_KEY` and your own Discord user ID in `OWNER_DISCORD_IDS`, so you can run `/setup`. No server ID is needed. Every variable is explained in `.env.example`. The bot checks the whole file on start and lists every problem at once.
 
 ### 5a. Run on a Node host
 
@@ -138,16 +152,13 @@ npm run build
 ```
 
 ```powershell
-npm run deploy-commands
-```
-
-```powershell
 npm start
 ```
 
-- `npm run deploy-commands` registers the slash commands in `DISCORD_GUILD_ID`, where they appear instantly. Run it again whenever you add or change a command. Use `npm run deploy-commands -- --global` for every server the bot is in (this can take up to an hour), and `-- --clear` to remove them.
+- The bot registers its slash commands globally each time it starts, so they appear in every server it's in. The first time, they can take a few minutes to show up. Set `REGISTER_COMMANDS=false` to stop this.
+- `npm run deploy-commands -- --guild <server id>` registers a copy in one server only, instantly, for testing. Remove it afterwards with `npm run deploy-commands -- --clear --guild <server id>`, or every command shows twice there. `npm run deploy-commands -- --clear` removes the global ones.
 - Keep the bot running with a process manager, for example `pm2 start dist/index.js --name hk1941-bot` or a systemd service with `WorkingDirectory` set to this folder.
-- Account links are saved in `DATA_DIR/links.json`. **Back it up.**
+- Account links are saved in `DATA_DIR/links.json` and server settings in `DATA_DIR/guilds.json`. **Back them up.**
 
 ### 5b. Run with Docker
 
@@ -156,14 +167,10 @@ docker compose build
 ```
 
 ```powershell
-docker compose run --rm bot node dist/deploy-commands.js
-```
-
-```powershell
 docker compose up -d
 ```
 
-Links are kept in the `bot-data` volume. Logs are JSON on stdout (`docker compose logs -f bot`).
+Links and server settings are kept in the `bot-data` volume. Logs are JSON on stdout (`docker compose logs -f bot`).
 
 ### 6. Check it works
 

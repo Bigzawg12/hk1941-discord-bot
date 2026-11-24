@@ -8,6 +8,7 @@ import type {
 import type { BridgeClient } from './bridge/client.js';
 import type { BotConfig } from './config.js';
 import type { AuditLog } from './discord/audit.js';
+import type { GuildSettingsStore } from './guilds/settings.js';
 import type { LinkService } from './linking/service.js';
 import type { Logger } from './logger.js';
 import type { PermissionResolver, ResolvedTier } from './permissions/resolver.js';
@@ -31,6 +32,8 @@ export interface Services {
   links: LinkService;
   permissions: PermissionResolver;
   audit: AuditLog;
+  /** per-server settings from /setup */
+  guilds: GuildSettingsStore;
   /** filled in by the loader */
   commands: Map<string, Command>;
 }

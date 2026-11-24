@@ -1,4 +1,5 @@
 import type { BotConfig } from '../config.js';
+import type { GuildSettingsStore } from '../guilds/settings.js';
 import type { LinkService } from '../linking/service.js';
 import type { Logger } from '../logger.js';
 import type { GroupsClient } from '../roblox/groups.js';
@@ -8,6 +9,8 @@ import { highest, tierFromArmyRank, tierFromDiscord, type Tier, type TierSource 
 export interface MemberInfo {
   discordId: string;
   roleIds: Iterable<string>;
+  /** the server the command was used in; its /setup staff roles count there */
+  guildId?: string | null;
 }
 
 export interface ResolvedTier extends TierSource {
@@ -26,16 +29,17 @@ export class PermissionResolver {
 
   constructor(
     private readonly config: BotConfig,
-    private readonly deps: { links: LinkService; groups: GroupsClient; logger?: Logger },
+    private readonly deps: { links: LinkService; groups: GroupsClient; guilds?: GuildSettingsStore; logger?: Logger },
   ) {}
 
   async resolve(member: MemberInfo): Promise<ResolvedTier> {
     const roles = [...member.roleIds];
-    const key = `${member.discordId}:${roles.sort().join(',')}`;
+    const key = `${member.guildId ?? '-'}:${member.discordId}:${roles.sort().join(',')}`;
     const hit = this.cache.get(key);
     if (hit) return hit;
 
-    const fromDiscord = tierFromDiscord(member.discordId, roles, this.config.permissions);
+    const serverRoles = member.guildId && this.deps.guilds ? (await this.deps.guilds.get(member.guildId)).staffRoles : {};
+    const fromDiscord = tierFromDiscord(member.discordId, roles, this.config.permissions, serverRoles);
     const link = await this.deps.links.get(member.discordId);
     let result: ResolvedTier = { ...fromDiscord };
     if (link) {
@@ -72,8 +76,9 @@ export class PermissionResolver {
     }
   }
 
-  forget(discordId: string): void {
-    // cheap and rare (after /link): drop everything rather than track keys per member
+  /** Drop cached tiers (after /link, or after /setup changes a server's staff roles). */
+  forget(discordId?: string): void {
+    // cheap and rare: drop everything rather than track keys per member
     void discordId;
     this.cache.clear();
   }

@@ -116,6 +116,7 @@ export default defineCommand({
       target: `${user?.name ?? userId} (${userId})`,
       detail: `${current.roleName} (${current.rank}) → ${role.name} (${role.rank})`,
       ok: true,
+      guildId: interaction.guildId,
     });
     await interaction.editReply({ content: `✅ ${esc(user?.name ?? String(userId))} is now **${esc(role.name)}**. (In game it shows after they rejoin.)`, embeds: [], components: [] });
   },

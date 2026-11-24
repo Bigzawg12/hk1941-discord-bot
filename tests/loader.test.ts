@@ -7,7 +7,7 @@ import { testServices } from './helpers/fixtures.js';
 
 const EXPECTED = [
   'announce', 'arrests', 'award', 'ban', 'eligible', 'event', 'help', 'kick', 'link',
-  'medals', 'points', 'promote', 'record', 'release', 'status', 'unban',
+  'medals', 'points', 'promote', 'record', 'release', 'setup', 'status', 'unban',
 ];
 
 describe('command loader', () => {
@@ -65,7 +65,7 @@ describe('event loader', () => {
     const { services } = testServices([]);
     const client = new EventEmitter() as unknown as Client;
     const names = await loadEvents(client, services);
-    expect(names.sort()).toEqual(['clientReady (once)', 'error', 'interactionCreate', 'warn']);
+    expect(names.sort()).toEqual(['clientReady (once)', 'error', 'guildCreate', 'interactionCreate', 'warn']);
     expect((client as unknown as EventEmitter).listenerCount('interactionCreate')).toBe(1);
   });
 });

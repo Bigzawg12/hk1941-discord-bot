@@ -36,6 +36,7 @@ export async function runLiveAction<A extends BridgeAction>(
     target: opts.target ? `${opts.target.name} (${opts.target.id})` : undefined,
     detail: [opts.detail, `Result: ${text}`, `Bridge id: ${res.id}`].filter(Boolean).join('\n'),
     ok,
+    guildId: interaction.guildId,
   });
   return { ok, text, eventId: res.ack?.eventId };
 }

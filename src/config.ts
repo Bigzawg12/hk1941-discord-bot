@@ -21,9 +21,10 @@ export interface BotConfig {
   discord: {
     token: string;
     clientId: string;
-    guildId?: string;
     auditChannelId?: string;
     verifiedRoleId?: string;
+    /** register the slash commands globally each time the bot starts */
+    registerCommands: boolean;
   };
   roblox: {
     apiKey?: string;
@@ -156,9 +157,9 @@ const commandTiers = z.preprocess(
 const schema = z.object({
   DISCORD_TOKEN: optionalString,
   DISCORD_CLIENT_ID: optionalSnowflake,
-  DISCORD_GUILD_ID: optionalSnowflake,
   AUDIT_CHANNEL_ID: optionalSnowflake,
   VERIFIED_ROLE_ID: optionalSnowflake,
+  REGISTER_COMMANDS: bool(true),
 
   HK_OPEN_CLOUD_KEY: optionalString,
   ROBLOX_UNIVERSE_ID: positiveInt(10772680614),
@@ -218,12 +219,11 @@ export function loadConfig(env: Env, mode: ConfigMode = 'bot'): BotConfig {
     if (!e.HK_OPEN_CLOUD_KEY) problems.push('HK_OPEN_CLOUD_KEY: required (an Open Cloud API key made for the bot)');
     if (e.LINK_PROVIDER === 'bloxlink' && !e.BLOXLINK_API_KEY) problems.push('BLOXLINK_API_KEY: required when LINK_PROVIDER=bloxlink');
     if (e.LINK_PROVIDER === 'rover' && !e.ROVER_API_KEY) problems.push('ROVER_API_KEY: required when LINK_PROVIDER=rover');
-    if (e.LINK_PROVIDER !== 'blurb' && !e.DISCORD_GUILD_ID) problems.push('DISCORD_GUILD_ID: required for the Bloxlink / RoVer lookups');
   }
   const anyRoleTier =
     e.TIER1_ROLE_IDS.length + e.TIER2_ROLE_IDS.length + e.TIER3_ROLE_IDS.length + e.TIER4_ROLE_IDS.length + e.TIER5_ROLE_IDS.length;
   if (mode === 'bot' && anyRoleTier === 0 && e.OWNER_DISCORD_IDS.length === 0 && !e.TIER_FROM_ROBLOX_RANK) {
-    problems.push('No staff can be recognised: set TIERn_ROLE_IDS, OWNER_DISCORD_IDS or TIER_FROM_ROBLOX_RANK=true');
+    problems.push('No staff can be recognised, so nobody could run /setup: set OWNER_DISCORD_IDS, TIER_FROM_ROBLOX_RANK=true or TIERn_ROLE_IDS');
   }
   if (problems.length) throw new ConfigError(problems);
 
@@ -231,9 +231,9 @@ export function loadConfig(env: Env, mode: ConfigMode = 'bot'): BotConfig {
     discord: {
       token: e.DISCORD_TOKEN!,
       clientId: e.DISCORD_CLIENT_ID!,
-      guildId: e.DISCORD_GUILD_ID,
       auditChannelId: e.AUDIT_CHANNEL_ID,
       verifiedRoleId: e.VERIFIED_ROLE_ID,
+      registerCommands: e.REGISTER_COMMANDS,
     },
     roblox: {
       apiKey: e.HK_OPEN_CLOUD_KEY,

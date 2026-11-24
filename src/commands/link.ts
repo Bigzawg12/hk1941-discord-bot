@@ -72,7 +72,10 @@ export default defineCommand({
       const link = await links.verify(interaction.user.id, interaction.guildId);
       services.permissions.forget(interaction.user.id);
       let roleNote = '';
-      const roleId = services.config.discord.verifiedRoleId;
+      // this server's /setup verified role, else VERIFIED_ROLE_ID if that role is in this server
+      const own = interaction.guildId ? (await services.guilds.get(interaction.guildId)).verifiedRoleId : undefined;
+      const fallback = services.config.discord.verifiedRoleId;
+      const roleId = own ?? (fallback && interaction.guild?.roles.cache.has(fallback) ? fallback : undefined);
       if (roleId && interaction.guild) {
         try {
           const member = (interaction.member as GuildMember | null)?.roles?.add
@@ -85,7 +88,7 @@ export default defineCommand({
           roleNote = '\n(I could not give you the verified role; staff have been told in the log.)';
         }
       }
-      await services.audit.record({ actorId: interaction.user.id, actorName: interaction.user.username, action: 'Account linked', target: `${link.robloxName} (${link.robloxId})`, detail: `Method: ${link.method}`, ok: true });
+      await services.audit.record({ actorId: interaction.user.id, actorName: interaction.user.username, action: 'Account linked', target: `${link.robloxName} (${link.robloxId})`, detail: `Method: ${link.method}`, ok: true, guildId: interaction.guildId });
       await interaction.editReply(`✅ Linked to **${esc(link.robloxName)}** (${link.robloxId}).${roleNote}`);
       return;
     }
@@ -104,7 +107,7 @@ export default defineCommand({
     if (sub === 'remove') {
       const had = await links.unlink(interaction.user.id);
       services.permissions.forget(interaction.user.id);
-      if (had) await services.audit.record({ actorId: interaction.user.id, actorName: interaction.user.username, action: 'Account unlinked', ok: true });
+      if (had) await services.audit.record({ actorId: interaction.user.id, actorName: interaction.user.username, action: 'Account unlinked', ok: true, guildId: interaction.guildId });
       await interaction.reply({ content: had ? 'Unlinked.' : 'You were not linked.', ...ephemeral });
       return;
     }

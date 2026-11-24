@@ -150,3 +150,51 @@ describe('live actions', () => {
     expect(replyText(replies.at(-1))).toMatch(/up to 50 at a time/);
   });
 });
+
+describe('/setup', () => {
+  const newRole = { id: '888888888888888888', name: 'Staff' };
+
+  it('lets an owner map a role, which then counts in this server', async () => {
+    const { services } = await setup([], { OWNER_DISCORD_IDS: IDS.otherUser });
+    const { interaction, replies } = fakeInteraction({ commandName: 'setup', sub: 'staff-role', userId: IDS.otherUser, discordRoles: { role: newRole }, integers: { tier: 3 } });
+    await handleInteraction(services, interaction as unknown as Interaction);
+    expect(replyText(replies.at(-1))).toMatch(/Senior Moderator \(3\) in this server/);
+    expect((await services.guilds.get(IDS.guild)).staffRoles[newRole.id]).toBe(3);
+    const tier = await services.permissions.resolve({ discordId: IDS.staffUser, roleIds: [newRole.id], guildId: IDS.guild });
+    expect(tier.tier).toBe(3);
+  });
+
+  it('is refused below Administrator, so a server admin cannot make themselves game staff', async () => {
+    const { services } = await setup([]);
+    const { interaction, replies } = fakeInteraction({ commandName: 'setup', sub: 'staff-role', discordRoles: { role: newRole }, integers: { tier: 5 }, roles: [IDS.seniorRole] });
+    await handleInteraction(services, interaction as unknown as Interaction);
+    expect(replyText(replies.at(-1))).toMatch(/needs Administrator \(4\)/);
+    expect((await services.guilds.get(IDS.guild)).staffRoles).toEqual({});
+  });
+
+  it('only lets Administrators give tiers below their own', async () => {
+    const { services } = await setup([], { TIER4_ROLE_IDS: '777777777777777777' });
+    const run = async (tier: number) => {
+      const { interaction, replies } = fakeInteraction({ commandName: 'setup', sub: 'staff-role', discordRoles: { role: newRole }, integers: { tier }, roles: ['777777777777777777'] });
+      await handleInteraction(services, interaction as unknown as Interaction);
+      return replyText(replies.at(-1));
+    };
+    expect(await run(4)).toMatch(/only give tiers below your own/);
+    expect(await run(3)).toMatch(/now Senior Moderator/);
+  });
+
+  it('refuses @everyone', async () => {
+    const { services } = await setup([], { OWNER_DISCORD_IDS: IDS.staffUser });
+    const { interaction, replies } = fakeInteraction({ commandName: 'setup', sub: 'staff-role', discordRoles: { role: { id: IDS.guild, name: '@everyone' } }, integers: { tier: 1 } });
+    await handleInteraction(services, interaction as unknown as Interaction);
+    expect(replyText(replies.at(-1))).toMatch(/@everyone/);
+  });
+
+  it('sets the audit channel after a test post', async () => {
+    const { services } = await setup([], { OWNER_DISCORD_IDS: IDS.staffUser });
+    const { interaction, replies } = fakeInteraction({ commandName: 'setup', sub: 'audit-channel', channels: { channel: { id: '121212121212121212' } } });
+    await handleInteraction(services, interaction as unknown as Interaction);
+    expect(replyText(replies.at(-1))).toMatch(/posted in <#121212121212121212>/);
+    expect((await services.guilds.get(IDS.guild)).auditChannelId).toBe('121212121212121212');
+  });
+});

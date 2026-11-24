@@ -79,3 +79,20 @@ describe('PermissionResolver', () => {
     expect(groups.rankIn).not.toHaveBeenCalled();
   });
 });
+
+describe('per-server staff roles', () => {
+  const serverRole = '888888888888888888';
+  it('counts a role this server mapped with /setup, only in that server', async () => {
+    const { MemoryGuildSettingsStore } = await import('../src/guilds/settings.js');
+    const guilds = new MemoryGuildSettingsStore();
+    await guilds.update(IDS.guild, 'owner', (s) => {
+      s.staffRoles[serverRole] = 3;
+    });
+    const links = { get: vi.fn(async () => null) } as unknown as LinkService;
+    const r = new PermissionResolver(testConfig(), { links, groups: {} as GroupsClient, guilds });
+    expect((await r.resolve({ discordId: IDS.staffUser, roleIds: [serverRole], guildId: IDS.guild })).tier).toBe(3);
+    expect((await r.resolve({ discordId: IDS.staffUser, roleIds: [serverRole], guildId: '999999999999999999' })).tier).toBe(0);
+    // .env roles still work everywhere
+    expect((await r.resolve({ discordId: IDS.staffUser, roleIds: [IDS.modRole], guildId: '999999999999999999' })).tier).toBe(2);
+  });
+});

@@ -24,6 +24,7 @@ async function contextFor<I extends ChatInputCommandInteraction | ButtonInteract
   const caller = await services.permissions.resolve({
     discordId: interaction.user.id,
     roleIds: memberRoleIds(interaction.member),
+    guildId: interaction.guildId,
   });
   return {
     interaction,

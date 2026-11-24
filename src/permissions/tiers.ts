@@ -51,16 +51,20 @@ export interface TierSource {
   why: string;
 }
 
-/** Tier from the member's Discord roles and the owner list. */
+/**
+ * Tier from the member's Discord roles and the owner list. `serverRoles` is the role -> tier map
+ * this server set with /setup; the TIERn_ROLE_IDS lists in .env still work in every server too.
+ */
 export function tierFromDiscord(
   discordId: string,
   roleIds: Iterable<string>,
   perms: BotConfig['permissions'],
+  serverRoles: Record<string, number> = {},
 ): TierSource {
   if (perms.ownerDiscordIds.includes(discordId)) return { tier: 5, why: 'owner list' };
   const roles = new Set(roleIds);
   for (const t of [5, 4, 3, 2, 1] as const) {
-    const match = perms.roleTiers[t].find((r) => roles.has(r));
+    const match = perms.roleTiers[t].find((r) => roles.has(r)) ?? [...roles].find((r) => serverRoles[r] === t);
     if (match) return { tier: t, why: `Discord role ${match}` };
   }
   return { tier: 0, why: 'no staff role' };

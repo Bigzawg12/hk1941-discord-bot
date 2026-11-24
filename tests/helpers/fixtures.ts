@@ -1,6 +1,7 @@
 import { vi } from 'vitest';
 import type { ChatInputCommandInteraction } from 'discord.js';
 import { loadConfig, type BotConfig, type Env } from '../../src/config.js';
+import { MemoryGuildSettingsStore } from '../../src/guilds/settings.js';
 import { MemoryLinkStore } from '../../src/linking/store.js';
 import { silentLogger } from '../../src/logger.js';
 import { createServices } from '../../src/services.js';
@@ -20,7 +21,6 @@ export const IDS = {
 export const BASE_ENV: Env = {
   DISCORD_TOKEN: 'test-discord-token',
   DISCORD_CLIENT_ID: IDS.client,
-  DISCORD_GUILD_ID: IDS.guild,
   HK_OPEN_CLOUD_KEY: 'test-open-cloud-key',
   TIER2_ROLE_IDS: IDS.modRole,
   TIER3_ROLE_IDS: IDS.seniorRole,
@@ -58,6 +58,7 @@ export function testServices(routes: Route[], envOver: Env = {}): { services: Se
   const services = createServices(testConfig(envOver), silentLogger(), {
     fetch,
     linkStore: new MemoryLinkStore(),
+    guildStore: new MemoryGuildSettingsStore(),
     sleep: async () => undefined,
   });
   return { services, calls };
@@ -70,6 +71,8 @@ export interface FakeOptions {
   integers?: Record<string, number>;
   booleans?: Record<string, boolean>;
   users?: Record<string, { id: string; username: string }>;
+  discordRoles?: Record<string, { id: string; name: string; managed?: boolean; position?: number }>;
+  channels?: Record<string, { id: string }>;
   userId?: string;
   roles?: string[];
 }
@@ -83,6 +86,7 @@ export function fakeInteraction(o: FakeOptions = {}) {
     member: { roles: o.roles ?? [] },
     guildId: IDS.guild,
     guild: null,
+    client: { channels: { fetch: vi.fn(async () => ({ isSendable: () => true, send: vi.fn(async () => undefined) })) } },
     deferred: false,
     replied: false,
     inGuild: () => true,
@@ -102,6 +106,12 @@ export function fakeInteraction(o: FakeOptions = {}) {
       },
       getBoolean: (n: string) => o.booleans?.[n] ?? null,
       getUser: (n: string) => o.users?.[n] ?? null,
+      getRole: (n: string, required?: boolean) => {
+        const v = o.discordRoles?.[n];
+        if (v === undefined && required) throw new Error(`missing required option ${n}`);
+        return v ? { managed: false, position: 1, ...v } : null;
+      },
+      getChannel: (n: string) => o.channels?.[n] ?? null,
       getSubcommand: (required?: boolean) => {
         if (o.sub) return o.sub;
         if (required) throw new Error('no subcommand');
