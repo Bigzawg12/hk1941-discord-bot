@@ -1,5 +1,5 @@
 import { EmbedBuilder } from 'discord.js';
-import { CERT_BY_ID, CERT_RANK, MEDAL_BY_ID, MEDAL_RANK } from '../game/gameConfig.js';
+import { CERT_BY_ID, CERT_RANK, MAX_STRIPES, MEDAL_BY_ID, MEDAL_RANK } from '../game/gameConfig.js';
 import { computePoints, hours, standing } from '../game/points.js';
 import type { ArrestEntry, ProfileSnapshot } from '../game/profile.js';
 import type { ArrestLogEntry, GameEvent } from '../roblox/globalData.js';
@@ -27,7 +27,12 @@ export function tabNames(p: ProfileSnapshot): string[] {
   return Object.keys(p.data.medals.q)
     .filter((id) => CERT_BY_ID.has(id))
     .sort((a, b) => (CERT_RANK.get(a) ?? 99) - (CERT_RANK.get(b) ?? 99))
-    .map((id) => CERT_BY_ID.get(id)!.name);
+    .map((id) => {
+      const c = CERT_BY_ID.get(id)!;
+      if (!c.stripes) return c.name;
+      const count = Math.min(Math.max(p.data.medals.q[id]?.n ?? 1, 1), MAX_STRIPES);
+      return `${count} service stripe${count === 1 ? '' : 's'}`;
+    });
 }
 
 export function recordEmbed(

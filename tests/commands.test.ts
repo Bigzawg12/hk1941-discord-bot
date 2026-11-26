@@ -64,7 +64,7 @@ describe('/record', () => {
     expect(text).toContain('Corporal');
     expect(text).toContain('ELIGIBLE');
     expect(text).toContain('Military Cross');
-    expect(text).toContain('Marksman');
+    expect(text).toContain('Rifle Qualification Badge');
     expect(text).toContain('Arrests on record: 1'); // Moderators see the MP line
   });
 

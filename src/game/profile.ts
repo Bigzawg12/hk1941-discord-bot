@@ -18,6 +18,8 @@ export interface MedalAward {
 export interface Qualification {
   t?: number;
   by?: string;
+  /** service stripes: how many (1 to MedalConfig.MaxStripes) */
+  n?: number;
 }
 
 export interface TrainingEntry {

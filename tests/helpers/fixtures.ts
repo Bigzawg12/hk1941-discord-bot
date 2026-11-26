@@ -41,7 +41,7 @@ export const SAMPLE_PROFILE = {
   settings: {},
   medals: {
     a: { MC: { n: 1, t: 1763900000, by: 'Major', c: 'Held the bridge' }, PACIFIC: { n: 1, t: 1763900000, by: 'Major' } },
-    q: { MARKSMAN: { t: 1763900000, by: 'Sgt' } },
+    q: { RIFLE_QUAL: { t: 1763900000, by: 'Sgt' } },
     wear: true,
   },
   loadouts: {},

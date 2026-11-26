@@ -45,7 +45,14 @@ export const RANKS: Record<number, RankRequirement> = {
 export const ADJUST_TIER = 2;
 export const ADJUST_CAP = 50;
 
-export type MedalKind = 'Gallantry' | 'Order' | 'Campaign' | 'Service' | 'Long service' | 'Commendation';
+export type MedalKind =
+  | 'Gallantry'
+  | 'Order'
+  | 'Order of St John'
+  | 'Campaign'
+  | 'Service'
+  | 'Long service'
+  | 'Commendation';
 
 export interface Medal {
   id: string;
@@ -56,13 +63,19 @@ export interface Medal {
   top?: boolean;
 }
 
-/** MedalConfig.List, in order of precedence (most senior first). */
+/** MedalConfig.List, in order of precedence (most senior first). Checked against the place 2026-11-26. */
 export const MEDALS: Medal[] = [
   { id: 'VC', name: 'Victoria Cross', post: 'VC', kind: 'Gallantry', top: true },
   { id: 'GC', name: 'George Cross', post: 'GC', kind: 'Gallantry', top: true },
   { id: 'DSO', name: 'Distinguished Service Order', post: 'DSO', kind: 'Order' },
   { id: 'MBE', name: 'Member of the Order of the British Empire (Military)', post: 'MBE', kind: 'Order' },
   { id: 'MC', name: 'Military Cross', post: 'MC', kind: 'Gallantry' },
+  { id: 'STJ_GC', name: 'Bailiff / Dame Grand Cross of the Order of St. John', post: 'GCStJ', kind: 'Order of St John' },
+  { id: 'STJ_K', name: 'Knight / Dame of the Order of St. John', post: 'KStJ', kind: 'Order of St John' },
+  { id: 'STJ_C', name: 'Commander of the Order of St. John', post: 'CStJ', kind: 'Order of St John' },
+  { id: 'STJ_O', name: 'Officer of the Order of St. John', post: 'OStJ', kind: 'Order of St John' },
+  { id: 'STJ_M', name: 'Member (Serving Brother / Sister) of the Order of St. John', post: 'MStJ', kind: 'Order of St John' },
+  { id: 'STJ_E', name: 'Esquire of the Order of St. John', post: 'EsqStJ', kind: 'Order of St John' },
   { id: 'DCM', name: 'Distinguished Conduct Medal', post: 'DCM', kind: 'Gallantry' },
   { id: 'GM', name: 'George Medal', post: 'GM', kind: 'Gallantry' },
   { id: 'MM', name: 'Military Medal', post: 'MM', kind: 'Gallantry' },
@@ -74,28 +87,30 @@ export const MEDALS: Medal[] = [
   { id: 'LSGC', name: 'Long Service and Good Conduct Medal', kind: 'Long service' },
   { id: 'EM', name: 'Efficiency Medal (Canada)', kind: 'Long service' },
   { id: 'MID', name: 'Mention in Despatches', post: 'MiD', kind: 'Commendation' },
+  { id: 'CINC', name: 'Commander-in-Chief Unit Commendation', kind: 'Commendation' },
+  { id: 'GGCB', name: "Governor General's Commendation for Bravery", kind: 'Commendation' },
+  { id: 'CDS', name: 'Chief of the Defence Staff Commendation', kind: 'Commendation' },
+  { id: 'CMD', name: 'Command Commendation', kind: 'Commendation' },
+  { id: 'STJ_CHAN', name: "St. John Chancellor's Commendation", kind: 'Commendation' },
+  { id: 'STJ_PROV', name: 'St. John Provincial / Territorial Commendation', kind: 'Commendation' },
 ];
 
 export interface Cert {
   id: string;
   name: string;
+  /** Service stripes: each award adds one, up to MAX_STRIPES (the game counts them in rec.n) */
+  stripes?: boolean;
 }
 
-/** MedalConfig.Certs (qualification tabs), most senior first. */
+/** MedalConfig.Certs (sleeve badges), most senior first. */
 export const CERTS: Cert[] = [
-  { id: 'INSTRUCTOR', name: 'Instructor' },
-  { id: 'MARKSMAN', name: 'Marksman' },
-  { id: 'SNIPER', name: 'Sniper' },
-  { id: 'MG', name: 'Machine Gunner' },
-  { id: 'MORTAR', name: 'Mortarman' },
-  { id: 'SIGNALS', name: 'Signaller' },
-  { id: 'DRIVER', name: 'Driver' },
-  { id: 'PARA', name: 'Parachutist' },
-  { id: 'PIONEER', name: 'Pioneer' },
-  { id: 'SB', name: 'Stretcher Bearer' },
-  { id: 'PROVOST', name: 'Provost' },
-  { id: 'TANK', name: 'Tank Crew' },
+  { id: 'RIFLE_QUAL', name: 'Rifle Qualification Badge' },
+  { id: 'RIFLE_PROF', name: 'Rifle Proficiency Badge' },
+  { id: 'SERVICE', name: 'Service Stripes', stripes: true },
 ];
+
+/** MedalConfig.MaxStripes */
+export const MAX_STRIPES = 6;
 
 export const MEDAL_BY_ID: ReadonlyMap<string, Medal> = new Map(MEDALS.map((m) => [m.id, m]));
 export const CERT_BY_ID: ReadonlyMap<string, Cert> = new Map(CERTS.map((c) => [c.id, c]));

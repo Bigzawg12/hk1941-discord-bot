@@ -1,4 +1,5 @@
 import { InteractionContextType, SlashCommandBuilder } from 'discord.js';
+import { UserFacingError } from '../util/errors.js';
 import { needTier, resolveRobloxTarget } from '../discord/helpers.js';
 import { runLiveAction } from '../discord/liveAction.js';
 import { CERT_BY_ID, CERTS, MEDAL_BY_ID, MEDALS, MIN_AWARD_TIER, MIN_CERT_TIER, TOP_AWARD_TIER } from '../game/gameConfig.js';
@@ -21,9 +22,9 @@ export default defineCommand({
         .addStringOption((o) =>
           o
             .setName('medal')
-            .setDescription('Which medal')
+            .setDescription('Which medal (start typing to search)')
             .setRequired(true)
-            .addChoices(...MEDALS.map((m) => ({ name: m.name.slice(0, 100), value: m.id }))),
+            .setAutocomplete(true),
         )
         .addStringOption((o) => o.setName('citation').setDescription('Citation (shown in game)').setMaxLength(200))
         .addBooleanOption((o) => o.setName('revoke').setDescription('Remove one instead of awarding')),
@@ -36,18 +37,30 @@ export default defineCommand({
         .addStringOption((o) =>
           o
             .setName('tab')
-            .setDescription('Which qualification')
+            .setDescription('Which badge (Service Stripes adds or removes one stripe)')
             .setRequired(true)
             .addChoices(...CERTS.map((c) => ({ name: c.name, value: c.id }))),
         )
         .addBooleanOption((o) => o.setName('remove').setDescription('Remove the tab instead')),
     ),
 
+  // more medals than Discord's 25-choice limit, so the medal is searched as you type
+  async autocomplete(interaction) {
+    const typed = interaction.options.getFocused().toLowerCase().trim();
+    await interaction.respond(
+      MEDALS.filter((m) => !typed || m.name.toLowerCase().includes(typed) || m.id.toLowerCase().includes(typed) || (m.post ?? '').toLowerCase().includes(typed))
+        .slice(0, 25)
+        .map((m) => ({ name: `${m.name}${m.post ? ` (${m.post})` : ''}`.slice(0, 100), value: m.id })),
+    );
+  },
+
   async execute(ctx) {
     const { interaction } = ctx;
     const sub = interaction.options.getSubcommand(true);
     if (sub === 'medal') {
-      const medal = MEDAL_BY_ID.get(interaction.options.getString('medal', true))!;
+      const picked = interaction.options.getString('medal', true).trim();
+      const medal = MEDAL_BY_ID.get(picked.toUpperCase()) ?? MEDALS.find((m) => m.name.toLowerCase() === picked.toLowerCase());
+      if (!medal) throw new UserFacingError('Pick a medal from the list.');
       if (medal.top) needTier(ctx, TOP_AWARD_TIER as Tier, `The ${medal.name}`);
       await interaction.deferReply();
       const { user } = await resolveRobloxTarget(ctx, { allowSelf: false });
