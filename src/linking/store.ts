@@ -7,7 +7,7 @@ export interface AccountLink {
   robloxId: number;
   robloxName: string;
   /** how it was verified */
-  method: 'blurb' | 'bloxlink' | 'rover' | 'manual';
+  method: 'blurb' | 'bloxlink' | 'rover' | 'game' | 'manual';
   linkedAt: number;
 }
 

@@ -1,4 +1,5 @@
-import { EmbedBuilder, InteractionContextType, SlashCommandBuilder, type GuildMember } from 'discord.js';
+import { EmbedBuilder, InteractionContextType, SlashCommandBuilder } from 'discord.js';
+import { describeSync, syncEverywhere } from '../linking/memberSync.js';
 import { COLOURS, ephemeral, esc, needTier } from '../discord/helpers.js';
 import { Tier } from '../permissions/tiers.js';
 import { profileUrl } from '../roblox/users.js';
@@ -71,25 +72,11 @@ export default defineCommand({
       await interaction.deferReply(ephemeral);
       const link = await links.verify(interaction.user.id, interaction.guildId);
       services.permissions.forget(interaction.user.id);
-      let roleNote = '';
-      // this server's /setup verified role, else VERIFIED_ROLE_ID if that role is in this server
-      const own = interaction.guildId ? (await services.guilds.get(interaction.guildId)).verifiedRoleId : undefined;
-      const fallback = services.config.discord.verifiedRoleId;
-      const roleId = own ?? (fallback && interaction.guild?.roles.cache.has(fallback) ? fallback : undefined);
-      if (roleId && interaction.guild) {
-        try {
-          const member = (interaction.member as GuildMember | null)?.roles?.add
-            ? (interaction.member as GuildMember)
-            : await interaction.guild.members.fetch(interaction.user.id);
-          await member.roles.add(roleId, `Linked to Roblox ${link.robloxName} (${link.robloxId})`);
-          roleNote = `\nYou now have the <@&${roleId}> role.`;
-        } catch (err) {
-          ctx.logger.warn({ err }, 'could not give the verified role');
-          roleNote = '\n(I could not give you the verified role; staff have been told in the log.)';
-        }
-      }
+      const synced = describeSync(await syncEverywhere(services, interaction.client, interaction.user.id, `Linked to Roblox ${link.robloxName} (${link.robloxId})`));
+      const roleNote = synced ? `
+${synced}` : '';
       await services.audit.record({ actorId: interaction.user.id, actorName: interaction.user.username, action: 'Account linked', target: `${link.robloxName} (${link.robloxId})`, detail: `Method: ${link.method}`, ok: true, guildId: interaction.guildId });
-      await interaction.editReply(`✅ Linked to **${esc(link.robloxName)}** (${link.robloxId}).${roleNote}`);
+      await interaction.editReply({ content: `✅ Linked to **${esc(link.robloxName)}** (${link.robloxId}).${roleNote}`, allowedMentions: { parse: [] } });
       return;
     }
 
@@ -107,6 +94,7 @@ export default defineCommand({
     if (sub === 'remove') {
       const had = await links.unlink(interaction.user.id);
       services.permissions.forget(interaction.user.id);
+      if (had) await syncEverywhere(services, interaction.client, interaction.user.id, 'Unlinked').catch(() => undefined);
       if (had) await services.audit.record({ actorId: interaction.user.id, actorName: interaction.user.username, action: 'Account unlinked', ok: true, guildId: interaction.guildId });
       await interaction.reply({ content: had ? 'Unlinked.' : 'You were not linked.', ...ephemeral });
       return;

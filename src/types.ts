@@ -3,6 +3,7 @@ import type {
   ButtonInteraction,
   ChatInputCommandInteraction,
   ClientEvents,
+  ModalSubmitInteraction,
   RESTPostAPIChatInputApplicationCommandsJSONBody,
 } from 'discord.js';
 import type { BridgeClient } from './bridge/client.js';
@@ -13,6 +14,7 @@ import type { LinkService } from './linking/service.js';
 import type { Logger } from './logger.js';
 import type { PermissionResolver, ResolvedTier } from './permissions/resolver.js';
 import type { Tier } from './permissions/tiers.js';
+import type { PostStore } from './posts/store.js';
 import type { GlobalData } from './roblox/globalData.js';
 import type { GroupsClient } from './roblox/groups.js';
 import type { ProfileReader } from './roblox/profiles.js';
@@ -37,6 +39,8 @@ export interface Services {
   guilds: GuildSettingsStore;
   /** in-game events <-> Discord Events tab and event channels */
   eventSync: EventSync;
+  /** posts and SSUs waiting for approval */
+  posts: PostStore;
   /** filled in by the loader */
   commands: Map<string, Command>;
 }
@@ -62,6 +66,8 @@ export interface Command {
   autocomplete?(interaction: AutocompleteInteraction, services: Services): Promise<void>;
   /** buttons whose customId starts with "<command name>:" come here (after the same tier check) */
   button?(ctx: CommandContext<ButtonInteraction>): Promise<void>;
+  /** forms (modals) whose customId starts with "<command name>:" come here (after the same tier check) */
+  modal?(ctx: CommandContext<ModalSubmitInteraction>): Promise<void>;
 }
 
 export interface BotEvent<K extends keyof ClientEvents = keyof ClientEvents> {

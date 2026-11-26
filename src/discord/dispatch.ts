@@ -1,5 +1,12 @@
 import { randomBytes } from 'node:crypto';
-import type { AutocompleteInteraction, ButtonInteraction, ChatInputCommandInteraction, Interaction, RepliableInteraction } from 'discord.js';
+import type {
+  AutocompleteInteraction,
+  ButtonInteraction,
+  ChatInputCommandInteraction,
+  Interaction,
+  ModalSubmitInteraction,
+  RepliableInteraction,
+} from 'discord.js';
 import { requiredTier, TIER_NAMES } from '../permissions/tiers.js';
 import type { Command, CommandContext, Services } from '../types.js';
 import { RobloxApiError, UserFacingError } from '../util/errors.js';
@@ -11,13 +18,14 @@ export async function handleInteraction(services: Services, interaction: Interac
     if (interaction.isChatInputCommand()) return await runChatInput(services, interaction);
     if (interaction.isAutocomplete()) return await runAutocomplete(services, interaction);
     if (interaction.isButton()) return await runButton(services, interaction);
+    if (interaction.isModalSubmit()) return await runModal(services, interaction);
   } catch (err) {
     // last resort: anything that escaped the per-type handlers
     services.logger.error({ err }, 'interaction dispatch failed');
   }
 }
 
-async function contextFor<I extends ChatInputCommandInteraction | ButtonInteraction>(
+async function contextFor<I extends ChatInputCommandInteraction | ButtonInteraction | ModalSubmitInteraction>(
   services: Services,
   interaction: I,
 ): Promise<CommandContext<I>> {
@@ -89,6 +97,23 @@ async function runButton(services: Services, interaction: ButtonInteraction): Pr
     await command.button(ctx);
   } catch (err) {
     await reportError(services, interaction, err, `button ${name}`);
+  }
+}
+
+async function runModal(services: Services, interaction: ModalSubmitInteraction): Promise<void> {
+  const name = interaction.customId.split(':')[0] ?? '';
+  const command = services.commands.get(name);
+  if (!command?.modal) return;
+  try {
+    const ctx = await contextFor(services, interaction);
+    const need = requiredTier(command, null, services.config.permissions.commandTiers);
+    if (ctx.caller.tier < need) {
+      await interaction.reply({ content: denied(command, null, need), ...ephemeral });
+      return;
+    }
+    await command.modal(ctx);
+  } catch (err) {
+    await reportError(services, interaction, err, `form ${name}`);
   }
 }
 

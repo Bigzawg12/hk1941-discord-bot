@@ -4,6 +4,7 @@ import { loadConfig, type BotConfig, type Env } from '../../src/config.js';
 import { MemoryGuildSettingsStore } from '../../src/guilds/settings.js';
 import { MemoryLinkStore } from '../../src/linking/store.js';
 import { silentLogger } from '../../src/logger.js';
+import { MemoryPostStore } from '../../src/posts/store.js';
 import { createServices } from '../../src/services.js';
 import type { Services } from '../../src/types.js';
 import { mockFetch, type Route } from './mockFetch.js';
@@ -59,6 +60,7 @@ export function testServices(routes: Route[], envOver: Env = {}): { services: Se
     fetch,
     linkStore: new MemoryLinkStore(),
     guildStore: new MemoryGuildSettingsStore(),
+    postStore: new MemoryPostStore(),
     sleep: async () => undefined,
   });
   return { services, calls };
@@ -73,26 +75,148 @@ export interface FakeOptions {
   users?: Record<string, { id: string; username: string }>;
   discordRoles?: Record<string, { id: string; name: string; managed?: boolean; position?: number }>;
   channels?: Record<string, { id: string }>;
+  attachments?: Record<string, { url: string; name: string; contentType?: string; size?: number }>;
   userId?: string;
   roles?: string[];
+  /** share one fake Discord client between interactions (to see what was posted where) */
+  client?: FakeClient;
+}
+
+/** What the bot sent: channel posts and DMs. Every channel exists and accepts posts. */
+export function fakeClient() {
+  const sent: { channelId: string; payload: Record<string, unknown> }[] = [];
+  const dms: { userId: string; payload: Record<string, unknown> }[] = [];
+  let n = 0;
+  const guilds = new Map<string, unknown>();
+  const client = {
+    user: { id: IDS.client },
+    isReady: () => true,
+    guilds: { cache: guilds, fetch: vi.fn(async (id: string) => guilds.get(id) ?? null) },
+    channels: {
+      fetch: vi.fn(async (id: string) => ({
+        id,
+        guildId: IDS.guild,
+        isSendable: () => true,
+        send: vi.fn(async (payload: Record<string, unknown>) => {
+          sent.push({ channelId: id, payload });
+          const mid = String(900000000000000000n + BigInt(++n));
+          return { id: mid, url: `https://discord.com/channels/${IDS.guild}/${id}/${mid}` };
+        }),
+      })),
+    },
+    users: {
+      cache: new Map<string, { username: string }>(),
+      send: vi.fn(async (userId: string, payload: Record<string, unknown>) => {
+        dms.push({ userId, payload });
+      }),
+    },
+  };
+  return { client, sent, dms };
+}
+export type FakeClient = ReturnType<typeof fakeClient>;
+
+function replyMethods(i: { deferred: boolean; replied: boolean }, replies: unknown[]) {
+  return {
+    deferReply: vi.fn(async () => {
+      i.deferred = true;
+    }),
+    reply: vi.fn(async (x: unknown) => {
+      i.replied = true;
+      replies.push(x);
+    }),
+    editReply: vi.fn(async (x: unknown) => {
+      replies.push(x);
+    }),
+    followUp: vi.fn(async (x: unknown) => {
+      replies.push(x);
+    }),
+    showModal: vi.fn(async (m: unknown) => {
+      i.replied = true;
+      replies.push(m);
+    }),
+  };
+}
+
+const notA = { isChatInputCommand: () => false, isAutocomplete: () => false, isButton: () => false, isModalSubmit: () => false };
+
+/** A form (modal) being sent. */
+export function fakeModal(o: { customId: string; fields: Record<string, string>; userId?: string; roles?: string[]; client?: FakeClient; fromMessage?: boolean }) {
+  const replies: unknown[] = [];
+  const fc = o.client ?? fakeClient();
+  const i: Record<string, unknown> & { deferred: boolean; replied: boolean } = {
+    ...notA,
+    isModalSubmit: () => true,
+    customId: o.customId,
+    user: { id: o.userId ?? IDS.staffUser, username: 'tester' },
+    member: { roles: o.roles ?? [] },
+    guildId: IDS.guild,
+    guild: null,
+    client: fc.client,
+    deferred: false,
+    replied: false,
+    fields: {
+      getTextInputValue: (id: string) => {
+        if (!(id in o.fields)) throw new Error(`no field ${id}`);
+        return o.fields[id]!;
+      },
+    },
+    isFromMessage: () => !!o.fromMessage,
+    update: vi.fn(async (x: unknown) => {
+      i.replied = true;
+      replies.push(x);
+    }),
+  };
+  Object.assign(i, replyMethods(i, replies));
+  return { ...fc, interaction: i as never, raw: i, replies };
+}
+
+/** A button press on a message the bot posted. */
+export function fakeButton(o: { customId: string; userId?: string; roles?: string[]; client?: FakeClient; attachments?: { name: string; url: string }[] }) {
+  const replies: unknown[] = [];
+  const fc = o.client ?? fakeClient();
+  const i: Record<string, unknown> & { deferred: boolean; replied: boolean } = {
+    ...notA,
+    isButton: () => true,
+    customId: o.customId,
+    user: { id: o.userId ?? IDS.staffUser, username: 'tester' },
+    member: { roles: o.roles ?? [] },
+    guildId: IDS.guild,
+    guild: null,
+    client: fc.client,
+    deferred: false,
+    replied: false,
+    message: { attachments: o.attachments ?? [] },
+    deferUpdate: vi.fn(async () => {
+      i.deferred = true;
+    }),
+    update: vi.fn(async (x: unknown) => {
+      i.replied = true;
+      replies.push(x);
+    }),
+  };
+  Object.assign(i, replyMethods(i, replies));
+  return { ...fc, interaction: i as never, raw: i, replies };
 }
 
 /** Just enough of a ChatInputCommandInteraction for commands and the dispatcher. */
 export function fakeInteraction(o: FakeOptions = {}) {
   const replies: unknown[] = [];
+  const fc = o.client ?? fakeClient();
   const i = {
     commandName: o.commandName ?? 'record',
     user: { id: o.userId ?? IDS.staffUser, username: 'tester' },
     member: { roles: o.roles ?? [] },
     guildId: IDS.guild,
     guild: null,
-    client: { channels: { fetch: vi.fn(async () => ({ isSendable: () => true, send: vi.fn(async () => undefined) })) } },
+    channelId: '666666666666666666',
+    client: fc.client,
     deferred: false,
     replied: false,
     inGuild: () => true,
     isChatInputCommand: () => true,
     isAutocomplete: () => false,
     isButton: () => false,
+    isModalSubmit: () => false,
     options: {
       getString: (n: string, required?: boolean) => {
         const v = o.strings?.[n];
@@ -112,6 +236,7 @@ export function fakeInteraction(o: FakeOptions = {}) {
         return v ? { managed: false, position: 1, ...v } : null;
       },
       getChannel: (n: string) => o.channels?.[n] ?? null,
+      getAttachment: (n: string) => o.attachments?.[n] ?? null,
       getSubcommand: (required?: boolean) => {
         if (o.sub) return o.sub;
         if (required) throw new Error('no subcommand');
@@ -131,8 +256,12 @@ export function fakeInteraction(o: FakeOptions = {}) {
     followUp: vi.fn(async (x: unknown) => {
       replies.push(x);
     }),
+    showModal: vi.fn(async (m: unknown) => {
+      i.replied = true;
+      replies.push(m);
+    }),
   };
-  return { interaction: i as unknown as ChatInputCommandInteraction, raw: i, replies };
+  return { ...fc, interaction: i as unknown as ChatInputCommandInteraction, raw: i, replies };
 }
 
 /** Text of a reply that may be a string or { content, embeds }. */

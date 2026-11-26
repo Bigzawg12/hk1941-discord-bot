@@ -20,7 +20,9 @@ A Discord bot for the staff of **Hong Kong 1941**, the Canada 1940s group's WW2 
 | `/event list` | 0 | The same event list as `;events` in game. |
 | `/event schedule when title [detail]` | 2 | Posts an event to the in-game list. HKAdmin announces it 15 minutes before and when it starts. It also appears in every server's Events tab and calendar. |
 | `/event cancel id` | 2 | Cancels an event. |
-| `/link start / verify / status / remove` | 0 | Links your Discord account to your Roblox account. |
+| `/verify` | 0 | Bloxlink-style verification through the game: press **Join Hong Kong 1941**, type `/verify` in the game chat, then press **Enter code** and type the 8-letter code shown on screen. You then get the verified role, rank roles and nickname in every server the bot shares with you. A profile-phrase option is there for people who can't join. |
+| `/update [member]` | 0 (others: 1) | Refreshes roles and nickname from Roblox group ranks, e.g. after a promotion. |
+| `/link start / verify / status / remove` | 0 | The same linking as `/verify`, as separate steps. |
 | `/link whois [member] [user]` | 1 | Looks up a link in either direction. |
 | `/arrests [user] [count]` | 1 | Latest provost arrest log (`HK1941_MP/log`), or one player's arrests and any time left to serve. |
 | `/eligible [rank] [refresh]` | 1 | Everyone in the army group who meets the points and trainings for their next rank. |
@@ -33,6 +35,9 @@ A Discord bot for the staff of **Hong Kong 1941**, the Canada 1940s group's WW2 
 | `/unban user` | 4 | Lifts a ban and shows what it was. |
 | `/announce message` | 4 | Shows an announcement on every live server (like `;gannounce`). |
 | `/promote user rank [reason]` | 4 | Changes a soldier's army group rank. It shows their points standing and asks you to confirm first. |
+| `/post kind [channel] [ping] [ping-role] [image] [colour]` | 1 | A signed post (Recruitment, Shout, Notice, Orders, Training, Event), written in a form: title, a line under it, text, signature and up to 5 link buttons. It shows **Sent by** and **Approved by**. Posts from below the approver tier wait in the approval channel; see [Posts, SSUs and panels](#posts-ssus-and-panels). |
+| `/ssu [event] [message] [ping] [ping-role] [channel] [image]` | 1 | Server Start Up: a **Join Hong Kong 1941** button, a ping (default @here), the game's running or next event, how many servers are live, and the server's SSU banner. Approved like `/post`. |
+| `/panel create` · `edit message` | 4 | Info panels such as a Community Guidebook: title, text, link buttons, and the server's name and icon at the bottom. `edit` changes one the bot posted. |
 | `/help` | 0 | The commands you can use, your tier and your link. |
 | `/setup show` · `staff-role` · `audit-channel` · `verified-role` | 1 / 4 | This server's staff roles, audit channel and verified role. |
 
@@ -58,11 +63,28 @@ The bot works in every server it's in, with no server ID in `.env`. Its commands
 - `/setup event-channel [channel]`: the server's event calendar and announcements (see [Events](#events)).
 - `/setup event-ping [role]`: role pinged before each event starts.
 - `/setup event-sync on`: turn event syncing on or off for that server (on by default).
+- `/setup approval-channel [channel]`: where `/post` and `/ssu` requests wait for approval. Keep it staff-only.
+- `/setup post-approvers tier`: lowest tier that can approve, and post without approval (default 3, Senior Moderator). You can't set it above your own tier.
+- `/setup post-channel [channel]` and `/setup ssu-channel [channel]`: default channels for `/post` and `/ssu` (the SSU channel falls back to the post channel).
+- `/setup verify-panel [channel]`: posts a message with **Verify** and **Update** buttons that anyone can press.
+- `/setup unverified-role [role]`: role for members who haven't verified; it's taken away when they do.
+- `/setup nickname [template]`: nickname for verified members, using `{roblox}`, `{display}`, `{rank}` (army group rank name) and `{discord}`; for example `{rank} | {roblox}`. Leave it empty to leave nicknames alone.
+- `/setup bind role min-rank [max-rank] [group]`: like Bloxlink's group binds. Members whose rank in the group (default: the army group) is in the range get the role, and lose it when they leave the range. `/setup unbind role` removes it. Staff roles can't be bound, so a Roblox rank can never hand out a staff tier by accident.
+- `/setup ssu-banner [image]`: picture shown on every `/ssu`. It's saved to `DATA_DIR/banners/`, so it never depends on an expiring upload link.
 - `/setup show`: the current settings.
 
 `/setup` needs tier 4 (Administrator), and you can only give tiers **below your own** (owners can give any). Discord permissions don't count: a server admin who adds the bot can't make themselves game staff. The first person to set up a server needs tier 4 or 5 from `OWNER_DISCORD_IDS`, `TIER4/5_ROLE_IDS`, or the army rank of their linked Roblox account.
 
 Account links are per person, not per server, so someone linked in one server is linked in all of them.
+
+### Posts, SSUs and panels
+
+- **Who posts directly:** anyone at or above the server's approver tier (`/setup post-approvers`, default 3). Their post goes straight out with **Approved by** their own name. Everyone else's goes to the approval channel as a preview with **Approve** and **Reject** buttons.
+- **Approving:** only approvers can press the buttons, and not on their own post. Approve posts it, signed with the approver's name (their linked Roblox name, else their Discord name). Reject asks for a reason. Either way the queue message turns into a short record, and the author gets a DM if their DMs are open. Requests expire after 7 days and survive restarts (`DATA_DIR/posts.json`).
+- **Writing:** the text box takes Discord markdown (`**bold**`, `- lists`, `[link text](https://…)`). Forms can't pick emoji or channels, so type `:emoji_name:` for one of the server's emoji and `#channel-name` for a channel link. Link buttons go one per line as `Label | https://link`. If something is wrong (a bad button line, too long), the bot says what, with an **Edit and send again** button that keeps your text.
+- **Pings:** only the ping you choose goes out. `@everyone` or `@here` typed in the text never pings, and nobody named in the post is pinged. The preview in the approval channel never pings. To use @here or @everyone, the bot needs **Mention @everyone, @here and All Roles** (it's in the invite link below). To ping a role, the role must also allow mentions.
+- **SSU event:** if you don't give one, the bot uses the in-game event that's running (started within `EVENT_LENGTH_MIN`), else the next one within the hour. The live-servers line needs the bridge heartbeat or public servers.
+- **Panels** are classic embeds, so they can be edited later: `/panel edit` with the message link (right-click → Copy Message Link) opens the form with the current text filled in.
 
 ### Events
 
@@ -115,10 +137,11 @@ You need: Node.js 20 or newer (or Docker), a Discord server or servers where you
 
 1. Go to <https://discord.com/developers/applications> → **New Application** (for example "HK1941 Staff").
 2. On **General Information**, copy the **Application ID**. It goes in `DISCORD_CLIENT_ID`.
-3. On **Bot**, click **Reset Token** and copy the token into `DISCORD_TOKEN`. Keep it secret. Leave all three *Privileged Gateway Intents* off; the bot doesn't need them.
+3. On **Bot**, click **Reset Token** and copy the token into `DISCORD_TOKEN`. Keep it secret. Leave the *Privileged Gateway Intents* off, unless you want `AUTO_UPDATE_ON_JOIN=true`: that needs **Server Members Intent**.
 4. On **Bot**, turn **Public Bot** off, so only you can add it to servers.
-5. On **OAuth2 → URL Generator**, tick the scopes `bot` and `applications.commands`. Then tick these bot permissions: **View Channels**, **Send Messages**, **Embed Links**, **Read Message History**, **View Audit Log**, **Manage Roles**, **Create Events** and **Manage Events**. Open the generated URL to add the bot to a server; use the same URL for every other server. Or use this link with your Application ID in place of `APP_ID`: `https://discord.com/oauth2/authorize?client_id=APP_ID&scope=bot+applications.commands&permissions=17601044499584`.
-6. After it starts, run `/setup` in each server (see [Any server](#any-server)). If you use a verified role, drag the bot's role **above** it in Server Settings → Roles.
+5. On **OAuth2 → URL Generator**, tick the scopes `bot` and `applications.commands`. Then tick these bot permissions: **View Channels**, **Send Messages**, **Embed Links**, **Attach Files**, **Read Message History**, **Mention @everyone, @here and All Roles**, **Use External Emojis**, **View Audit Log**, **Manage Roles**, **Manage Nicknames**, **Create Events** and **Manage Events**. Open the generated URL to add the bot to a server; use the same URL for every other server. Or use this link with your Application ID in place of `APP_ID`: `https://discord.com/oauth2/authorize?client_id=APP_ID&scope=bot+applications.commands&permissions=17601179143296`.
+6. After it starts, run `/setup` in each server (see [Any server](#any-server)). Drag the bot's role **above** every role it gives out (verified, unverified, rank binds) and above the members whose nicknames it sets, in Server Settings → Roles.
+7. For the dashboard: on **OAuth2**, copy the **Client Secret** into `DISCORD_CLIENT_SECRET`, and under **Redirects** add `PUBLIC_URL` + `/auth/discord/callback` (by default `http://localhost:8080/auth/discord/callback`).
 
 ### 2. Create the Roblox Open Cloud API key
 
@@ -140,6 +163,8 @@ Make a key just for the bot: <https://create.roblox.com/dashboard/credentials> �
 Without the Memory Store scope the bot still works, but set `BRIDGE_ACKS=false`. Staff will then see "sent" instead of what happened.
 
 ### 3. Install the bridge in the place
+
+> **Updated 2026-11-25:** `DiscordBridge.server.luau` now also handles `/verify` in the game chat. If the old version is already in the place, paste the new one over it and publish. Until then, members get "That code isn't right" because no codes are being made. Use `GAME_VERIFY=false` to hide the in-game option.
 
 The bridge is in the repo but **not in the place yet**.
 
@@ -199,11 +224,37 @@ Links and server settings are kept in the `bot-data` volume. Logs are JSON on st
 
 ---
 
+## Admin dashboard
+
+A private website built into the bot, for you and your co-owner. It's on when `DISCORD_CLIENT_SECRET` and `SESSION_SECRET` are set, and only the Discord accounts in `DASHBOARD_ADMIN_IDS` (else `OWNER_DISCORD_IDS`) can sign in. Everyone else sees "not on the admin list".
+
+What it does:
+- **Overview:** live game servers and players, how many Discord servers and linked accounts, and everything waiting for approval.
+- **Servers:** for each Discord server: approve or reject waiting posts and SSUs; set channels (audit, event calendar, approval queue, posts, SSUs); verified and unverified roles, nickname template and rank binds (with the army ranks listed); post a Verify panel; staff roles; who approves posts; event ping and sync.
+- **Linked accounts:** search by Discord ID or Roblox name, update someone's roles, unlink them, or link someone by hand.
+
+Every change goes to the audit log, marked "(dashboard)".
+
+**Opening it.** It listens on `127.0.0.1:8080`, so only the machine running the bot can reach it. From your own PC, open an SSH tunnel to the server, then browse to <http://localhost:8080>:
+
+```
+ssh -L 8080:localhost:8080 you@your-server
+```
+
+Docker Compose publishes the port on the server's `127.0.0.1` only, so the tunnel works the same way. Your co-owner does the same with their own SSH login. If you'd rather reach it without SSH, put it behind HTTPS (for example a Cloudflare Tunnel with Cloudflare Access) and set `PUBLIC_URL` to that `https://` address. Then add the new callback URL in the Developer Portal. Don't publish port 8080 directly to the internet.
+
+**Setup.** Set `DISCORD_CLIENT_SECRET` (step 1.7), `SESSION_SECRET` (32+ random characters), and `DASHBOARD_ADMIN_IDS` (your and your co-owner's Discord user IDs: turn on Developer Mode in Discord, then right-click your name → Copy User ID). Restart the bot.
+
 ## Linking accounts
 
-- **`blurb` (default):** `/link start <username>` gives a phrase such as `hk1941 jade lantern otter peak`. The member puts it in their Roblox profile's **About**, then runs `/link verify`. The bot reads the About text through Roblox's public users API. The phrase expires after `LINK_CODE_TTL_MIN` minutes and can be deleted once the accounts are linked. No passwords or OAuth are involved, and no third party.
+- **In game (default, `GAME_VERIFY=true`):** `/verify` → **Join Hong Kong 1941** → type `/verify` in the game chat. The game server makes a one-off code from 20 consonants (8 letters, so no words and no digits for the chat filter to hide) and shows it only to that player, at the top of their screen for 3 minutes. It also keeps the code in MemoryStore sorted map `HK1941_Verify` (key `v_<CODE>`) for 10 minutes. The member presses **Enter code** in Discord, and the bot reads that key (memory-store read scope, which the key already has) and links the accounts.
+  - **Why this direction:** the code is made in game, so it proves the Roblox account; it's typed in by the Discord account, so it proves that too. Nobody can trick someone into linking to the wrong Discord account with a code they made up.
+  - **Limits:** each code works once. After 5 wrong codes a member has to wait 10 minutes, and there are 20⁸ ≈ 25 billion possible codes. Typing `/verify` again in game gives a new code (at most one every 10 seconds).
+  - **No website needed:** the admin dashboard stays private.
+- **`blurb` (fallback, also on the "Can't join?" button):** `/link start <username>` gives a phrase such as `hk1941 jade lantern otter peak`. The member puts it in their Roblox profile's **About**, then runs `/link verify`. The bot reads the About text through Roblox's public users API. The phrase expires after `LINK_CODE_TTL_MIN` minutes and can be deleted once the accounts are linked. No passwords or OAuth are involved, and no third party.
 - **`bloxlink` / `rover`:** if your server already uses one of these, set `LINK_PROVIDER` and its API key. `/link verify` then asks that service instead. *TODO: check both endpoints against their current docs before relying on them (`src/linking/providers.ts`).*
-- Each Roblox account can be linked to one Discord account at a time. Staff can check links with `/link whois`.
+- **Like Bloxlink:** linking is done once and works in every server the bot is in. Linking, unlinking, `/update` and the Update button set each server's verified and unverified roles, rank-bind roles and nickname. With `AUTO_UPDATE_ON_JOIN=true` (and Server Members Intent), linked members get them as soon as they join a server.
+- Each Roblox account can be linked to one Discord account at a time. Staff can check links with `/link whois`; owners can search, unlink and link by hand on the dashboard.
 
 ---
 
@@ -262,9 +313,12 @@ tests/
 - **Promotions in game** show after the player rejoins; that's how Roblox caches group ranks.
 - **Clock:** servers ignore messages older than `BRIDGE_MESSAGE_TTL_SEC` (+60 s slack), so keep the host's clock synced (NTP).
 - **Open Cloud DataStores v1** is used for reads. If Roblox retires v1, switch `src/roblox/datastores.ts` to the v2 entries endpoint; nothing else needs to change.
+- **Posts use Discord's newer message layout** (components v2). Very old Discord apps show them as blank. Info panels are classic embeds and show everywhere.
 - **One bot process:** links are a JSON file. If you ever run more than one copy, implement `LinkStore` on a database.
 
 ### Security notes
+
+- **Dashboard:** Discord sign-in only, restricted to `DASHBOARD_ADMIN_IDS`. Session cookies are HttpOnly and SameSite, and marked Secure when `PUBLIC_URL` is https. Every form carries a CSRF token. Strict Content-Security-Policy, no JavaScript, and all names are escaped. Sessions are kept in memory, so a restart signs you out. It binds to localhost by default.
 
 - The bot holds two secrets: the Discord token and the Open Cloud key. They live only in `.env` (git-ignored) and are redacted from logs. The key is only ever sent to `apis.roblox.com`.
 - Only someone holding an Open Cloud key with messaging publish on this experience, or a game server, can send to the bridge topic. The bridge still checks tiers, ban caps and message expiry, and handles each message ID only once.

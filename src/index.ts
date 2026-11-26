@@ -6,6 +6,7 @@ import { loadEvents } from './loaders/events.js';
 import { createLogger } from './logger.js';
 import { createServices } from './services.js';
 import { ConfigError } from './util/errors.js';
+import { createDashboard } from './web/server.js';
 
 async function main(): Promise<void> {
   let config;
@@ -22,17 +23,30 @@ async function main(): Promise<void> {
   const services = createServices(config, logger);
   services.commands = await loadCommands();
 
-  // Slash commands only: no privileged intents needed (member roles come with each interaction).
+  // No privileged intents by default (member roles come with each interaction). AUTO_UPDATE_ON_JOIN
+  // adds Server Members, which must also be switched on in the Developer Portal.
+  const intents = [GatewayIntentBits.Guilds, GatewayIntentBits.GuildScheduledEvents];
+  if (config.linking.autoUpdateOnJoin) intents.push(GatewayIntentBits.GuildMembers);
   const client = new Client({
-    intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildScheduledEvents],
+    intents,
     partials: [Partials.GuildMember, Partials.GuildScheduledEvent],
   });
   const events = await loadEvents(client, services);
   logger.info({ commands: [...services.commands.keys()], events }, 'loaded');
 
+  let dashboard: ReturnType<typeof createDashboard> | undefined;
+  if (config.web.enabled) {
+    dashboard = createDashboard({ services, client: () => (client.isReady() ? client : null) });
+    const port = await dashboard.listen();
+    logger.info({ url: config.web.publicUrl, host: config.web.host, port, admins: config.web.adminIds.length }, 'dashboard listening');
+  } else {
+    logger.info('dashboard off (set DISCORD_CLIENT_SECRET and SESSION_SECRET to turn it on)');
+  }
+
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'shutting down');
     services.eventSync.stop();
+    await dashboard?.close();
     await client.destroy();
     process.exit(0);
   };

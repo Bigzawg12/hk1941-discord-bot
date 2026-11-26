@@ -4,10 +4,11 @@ import type { BotConfig } from './config.js';
 import { AuditLog } from './discord/audit.js';
 import { JsonFileGuildSettingsStore, type GuildSettingsStore } from './guilds/settings.js';
 import { BloxlinkProvider, RoVerProvider, type ExternalLinkProvider } from './linking/providers.js';
-import { LinkService } from './linking/service.js';
+import { LinkService, type GameCode } from './linking/service.js';
 import { JsonFileLinkStore, type LinkStore } from './linking/store.js';
 import type { Logger } from './logger.js';
 import { PermissionResolver } from './permissions/resolver.js';
+import { JsonFilePostStore, type PostStore } from './posts/store.js';
 import { DataStoreReader } from './roblox/datastores.js';
 import { GlobalData } from './roblox/globalData.js';
 import { GroupsClient } from './roblox/groups.js';
@@ -24,6 +25,7 @@ export interface ServiceOverrides {
   fetch?: FetchLike;
   linkStore?: LinkStore;
   guildStore?: GuildSettingsStore;
+  postStore?: PostStore;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -48,6 +50,9 @@ export function createServices(config: BotConfig, logger: Logger, overrides: Ser
     provider,
     codeTtlMinutes: config.linking.codeTtlMinutes,
     now: overrides.now,
+    gameCodes: config.linking.gameVerify
+      ? async (code) => (await sortedMaps.getItem<GameCode>(config.linking.verifyMap, `v_${code}`))?.value ?? null
+      : undefined,
   });
 
   const guilds = overrides.guildStore ?? new JsonFileGuildSettingsStore(join(config.dataDir, 'guilds.json'), overrides.now);
@@ -81,6 +86,7 @@ export function createServices(config: BotConfig, logger: Logger, overrides: Ser
     permissions: new PermissionResolver(config, { links, groups, guilds, logger }),
     audit: new AuditLog(logger, config.discord.auditChannelId, guilds),
     guilds,
+    posts: overrides.postStore ?? new JsonFilePostStore(join(config.dataDir, 'posts.json'), overrides.now),
     commands: new Map(),
     eventSync: undefined as unknown as EventSync, // set just below: it needs the finished services
   };

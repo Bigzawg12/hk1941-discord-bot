@@ -18,4 +18,6 @@ COPY --from=build /app/dist ./dist
 RUN mkdir -p /app/data && chown -R node:node /app/data
 USER node
 VOLUME ["/app/data"]
+# admin dashboard
+EXPOSE 8080
 CMD ["node", "dist/index.js"]

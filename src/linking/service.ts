@@ -44,6 +44,23 @@ interface Pending {
   code: string;
 }
 
+/** What the game wrote for a /verify code typed in game chat (DiscordBridge, sorted map VERIFY_MAP). */
+export interface GameCode {
+  u?: number;
+  n?: string;
+  d?: string;
+  t?: number;
+}
+
+/** "qztr kmpl" / "QZTR-KMPL" -> "QZTRKMPL"; null if it can't be a code. */
+export function normaliseGameCode(text: string): string | null {
+  const c = text.toUpperCase().replace(/[^A-Z]/g, '');
+  return /^[BCDFGHJKLMNPQRSTVWXZ]{8}$/.test(c) ? c : null;
+}
+
+/** Wrong codes allowed per member before a pause (guessing protection). */
+export const GAME_CODE_TRIES = 5;
+
 export interface LinkServiceDeps {
   store: LinkStore;
   users: UsersClient;
@@ -51,15 +68,52 @@ export interface LinkServiceDeps {
   codeTtlMinutes: number;
   now?: () => number;
   makeCode?: () => string;
+  /** reads a code written by the game; undefined = verifying in game is off */
+  gameCodes?: (code: string) => Promise<GameCode | null>;
 }
 
 export class LinkService {
   private readonly pending: TtlCache<string, Pending>;
   private readonly now: () => number;
+  /** discordId -> wrong game codes in the last 10 minutes */
+  private readonly tries: TtlCache<string, number>;
+  /** game codes already used (the bot can't delete them from MemoryStore) */
+  private readonly usedCodes: TtlCache<string, true>;
 
   constructor(private readonly deps: LinkServiceDeps) {
     this.now = deps.now ?? Date.now;
     this.pending = new TtlCache(deps.codeTtlMinutes * 60_000, 5000, this.now);
+    this.tries = new TtlCache(10 * 60_000, 5000, this.now);
+    this.usedCodes = new TtlCache(15 * 60_000, 20_000, this.now);
+  }
+
+  /** The game shows codes for /verify typed in game chat. */
+  get gameLinking(): boolean {
+    return !!this.deps.gameCodes;
+  }
+
+  /** Link with a code the player got from typing /verify in the game. */
+  async verifyGameCode(discordId: string, typed: string): Promise<AccountLink> {
+    if (!this.deps.gameCodes) throw new UserFacingError('Verifying in game is turned off here.');
+    const used = this.tries.get(discordId) ?? 0;
+    if (used >= GAME_CODE_TRIES) throw new UserFacingError('Too many wrong codes. Wait 10 minutes, then type /verify in game for a new one.');
+    const code = normaliseGameCode(typed);
+    const wrong = (msg: string) => {
+      this.tries.set(discordId, used + 1);
+      return new UserFacingError(msg);
+    };
+    if (!code) throw wrong('Codes are 8 letters, like QZTR KMPL. Type /verify in the game chat to get yours.');
+    if (this.usedCodes.get(code)) throw wrong('That code was already used. Type /verify in game for a new one.');
+    const entry = await this.deps.gameCodes(code);
+    const robloxId = Number(entry?.u);
+    if (!entry || !Number.isSafeInteger(robloxId) || robloxId <= 0) {
+      throw wrong("That code isn't right, or it has expired (codes last 10 minutes). Type /verify in game for a new one.");
+    }
+    this.usedCodes.set(code, true);
+    this.tries.delete(discordId);
+    let name = typeof entry.n === 'string' && entry.n ? entry.n : '';
+    if (!name) name = (await this.deps.users.getById(robloxId))?.name ?? String(robloxId);
+    return this.linkVerified(discordId, { id: robloxId, name }, 'game');
   }
 
   get mode(): 'blurb' | 'bloxlink' | 'rover' {
@@ -68,6 +122,10 @@ export class LinkService {
 
   get(discordId: string): Promise<AccountLink | null> {
     return this.deps.store.get(discordId);
+  }
+
+  all(): Promise<AccountLink[]> {
+    return this.deps.store.all();
   }
 
   findByRoblox(robloxId: number): Promise<AccountLink | null> {
@@ -111,6 +169,19 @@ export class LinkService {
     const link: AccountLink = { discordId, robloxId, robloxName, method: this.mode, linkedAt: Math.floor(this.now() / 1000) };
     await this.deps.store.set(link);
     return link;
+  }
+
+  /** Save a link already proven another way (Roblox sign-in on the website). */
+  async linkVerified(discordId: string, user: { id: number; name: string }, method: AccountLink['method']): Promise<AccountLink> {
+    const link: AccountLink = { discordId, robloxId: user.id, robloxName: user.name, method, linkedAt: Math.floor(this.now() / 1000) };
+    this.pending.delete(discordId);
+    await this.deps.store.set(link);
+    return link;
+  }
+
+  /** The profile-code check is available (no third-party provider configured). */
+  get codeLinking(): boolean {
+    return !this.deps.provider;
   }
 
   unlink(discordId: string): Promise<boolean> {

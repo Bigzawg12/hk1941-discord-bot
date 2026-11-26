@@ -56,6 +56,24 @@ export interface BotConfig {
     bloxlinkApiKey?: string;
     roverApiKey?: string;
     codeTtlMinutes: number;
+    /** give roles and nicknames when a linked member joins a server (needs the Server Members Intent) */
+    autoUpdateOnJoin: boolean;
+    /** verify in game: the player types /verify in game chat and enters the code shown in Discord */
+    gameVerify: boolean;
+    /** MemoryStore sorted map the game writes those codes to (must match DiscordBridge) */
+    verifyMap: string;
+  };
+  web: {
+    /** the private admin dashboard; off when DISCORD_CLIENT_SECRET or SESSION_SECRET is missing */
+    enabled: boolean;
+    host: string;
+    port: number;
+    /** address you open in your browser, without a trailing slash */
+    publicUrl: string;
+    discordClientSecret?: string;
+    sessionSecret?: string;
+    /** Discord user IDs allowed in (DASHBOARD_ADMIN_IDS, else OWNER_DISCORD_IDS) */
+    adminIds: string[];
   };
   events: {
     /** keep in-game events, each server's Events tab and its event channel in step */
@@ -196,6 +214,18 @@ const schema = z.object({
   BLOXLINK_API_KEY: optionalString,
   ROVER_API_KEY: optionalString,
   LINK_CODE_TTL_MIN: positiveInt(15),
+  AUTO_UPDATE_ON_JOIN: bool(false),
+
+  WEB: bool(true),
+  WEB_HOST: z.preprocess(blankToUndefined, z.string().default('127.0.0.1')),
+  WEB_PORT: positiveInt(8080),
+  PUBLIC_URL: z.preprocess(blankToUndefined, z.string().url().optional()),
+  DISCORD_CLIENT_SECRET: optionalString,
+  SESSION_SECRET: optionalString,
+  DASHBOARD_ADMIN_IDS: snowflakeList,
+
+  GAME_VERIFY: bool(true),
+  VERIFY_MAP: z.preprocess(blankToUndefined, z.string().regex(/^[\w-]{1,80}$/).default('HK1941_Verify')),
 
   EVENT_SYNC: bool(true),
   EVENT_SYNC_SEC: positiveInt(60),
@@ -233,7 +263,13 @@ export function loadConfig(env: Env, mode: ConfigMode = 'bot'): BotConfig {
   if (mode === 'bot' && anyRoleTier === 0 && e.OWNER_DISCORD_IDS.length === 0 && !e.TIER_FROM_ROBLOX_RANK) {
     problems.push('No staff can be recognised, so nobody could run /setup: set OWNER_DISCORD_IDS, TIER_FROM_ROBLOX_RANK=true or TIERn_ROLE_IDS');
   }
+  if (e.SESSION_SECRET && e.SESSION_SECRET.length < 32) problems.push('SESSION_SECRET: use at least 32 random characters');
+  const adminIds = e.DASHBOARD_ADMIN_IDS.length ? e.DASHBOARD_ADMIN_IDS : e.OWNER_DISCORD_IDS;
+  if (mode === 'bot' && e.WEB && e.DISCORD_CLIENT_SECRET && e.SESSION_SECRET && !adminIds.length) {
+    problems.push('DASHBOARD_ADMIN_IDS: list the Discord user IDs allowed into the dashboard (or set OWNER_DISCORD_IDS)');
+  }
   if (problems.length) throw new ConfigError(problems);
+  const publicUrl = (e.PUBLIC_URL ?? `http://localhost:${e.WEB_PORT}`).replace(/\/+$/, '');
 
   return {
     discord: {
@@ -279,6 +315,18 @@ export function loadConfig(env: Env, mode: ConfigMode = 'bot'): BotConfig {
       bloxlinkApiKey: e.BLOXLINK_API_KEY,
       roverApiKey: e.ROVER_API_KEY,
       codeTtlMinutes: e.LINK_CODE_TTL_MIN,
+      autoUpdateOnJoin: e.AUTO_UPDATE_ON_JOIN,
+      gameVerify: e.GAME_VERIFY,
+      verifyMap: e.VERIFY_MAP,
+    },
+    web: {
+      enabled: e.WEB && !!e.DISCORD_CLIENT_SECRET && !!e.SESSION_SECRET,
+      host: e.WEB_HOST,
+      port: e.WEB_PORT,
+      publicUrl,
+      discordClientSecret: e.DISCORD_CLIENT_SECRET,
+      sessionSecret: e.SESSION_SECRET,
+      adminIds,
     },
     events: {
       sync: e.EVENT_SYNC,

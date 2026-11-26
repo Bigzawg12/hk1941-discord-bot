@@ -4,6 +4,10 @@ services:
     env_file: .env
     environment:
       DATA_DIR: /app/data
+      WEB_HOST: 0.0.0.0
+    ports:
+      # dashboard: reachable only from the server itself (use an SSH tunnel from your PC)
+      - "127.0.0.1:8080:8080"
     volumes:
       - bot-data:/app/data
     restart: unless-stopped

@@ -16,6 +16,9 @@ How it works
     what happened. Announcements are carried out by every server, each adding itself to the count.
   * Every 30 s each server writes a heartbeat (players, uptime, objectives) to sorted map SERVER_MAP for /status.
   * Actions are added to HKAdmin's log (HK1941_AdminLog/recent), so ;logs in game shows them.
+  * Account linking: a player types /verify in chat; the server shows them (only them) a one-off 8-letter code
+    and keeps it in sorted map VERIFY_MAP for VERIFY_TTL seconds as key "v_<CODE>" = { u, n, d, t }.
+    They type the code into /verify in Discord, and the bot reads it (read only) to link the accounts.
 
 Message (bot -> game), JSON, at most 1 kB:
   { v = 1, id = "<12 chars>", ts = <unix>, exp = <unix>, act = "<action>",
@@ -65,6 +68,9 @@ local HEARTBEAT_TTL = 120
 local OFFLINE_DELAY = 4                 -- seconds a server without the target waits before claiming
 local CLOCK_SLACK = 60                  -- tolerated clock difference between the bot host and Roblox
 local CONTROL_TIMEOUT = 10              -- seconds to wait for a bindable to answer
+local VERIFY_MAP = "HK1941_Verify"      -- bot: VERIFY_MAP
+local VERIFY_TTL = 600                  -- seconds a /verify code works
+local VERIFY_SHOW = 180                 -- seconds the code stays on screen
 
 if RunService:IsStudio() and not script:GetAttribute("RunInStudio") then
 	print("[DiscordBridge] off in Studio (set attribute RunInStudio = true on this script to test)")
@@ -467,6 +473,113 @@ task.spawn(function()
 		for id, t in pairs(seen) do if t < cutoff then seen[id] = nil; owned[id] = nil end end
 	end
 end)
+
+-- ---------- account linking: /verify in chat ----------
+-- Consonants only: no words can come out, and no digits for the chat filter to hide. 20^8 codes.
+local CODE_LETTERS = "BCDFGHJKLMNPQRSTVWXZ"
+local verifyMap = MSS:GetSortedMap(VERIFY_MAP)
+local lastVerify = {} -- userId -> os.clock(), one code per 10 seconds per player
+local rng = Random.new()
+
+local function newCode()
+	local t = {}
+	for i = 1, 8 do
+		local k = rng:NextInteger(1, #CODE_LETTERS)
+		t[i] = CODE_LETTERS:sub(k, k)
+	end
+	return table.concat(t)
+end
+
+-- built on the server, so it needs no LocalScript; only this player sees it
+local function showVerify(player, title, body)
+	local pg = player:FindFirstChildOfClass("PlayerGui")
+	if not pg then return end
+	local old = pg:FindFirstChild("DiscordVerify")
+	if old then old:Destroy() end
+	local gui = Instance.new("ScreenGui")
+	gui.Name = "DiscordVerify"
+	gui.ResetOnSpawn = false
+	gui.DisplayOrder = 50
+	local frame = Instance.new("Frame")
+	frame.AnchorPoint = Vector2.new(0.5, 0)
+	frame.Position = UDim2.new(0.5, 0, 0, 72)
+	frame.Size = UDim2.fromOffset(440, 150)
+	frame.BackgroundColor3 = Color3.fromRGB(33, 31, 26)
+	frame.BackgroundTransparency = 0.08
+	frame.Parent = gui
+	local corner = Instance.new("UICorner")
+	corner.CornerRadius = UDim.new(0, 8)
+	corner.Parent = frame
+	local stroke = Instance.new("UIStroke")
+	stroke.Color = Color3.fromRGB(181, 164, 103)
+	stroke.Thickness = 1
+	stroke.Parent = frame
+	local pad = Instance.new("UIPadding")
+	for _, side in ipairs({ "PaddingTop", "PaddingBottom", "PaddingLeft", "PaddingRight" }) do pad[side] = UDim.new(0, 12) end
+	pad.Parent = frame
+	local head = Instance.new("TextLabel")
+	head.BackgroundTransparency = 1
+	head.Size = UDim2.new(1, 0, 0, 22)
+	head.Font = Enum.Font.GothamBold
+	head.TextSize = 16
+	head.TextColor3 = Color3.fromRGB(236, 232, 219)
+	head.TextXAlignment = Enum.TextXAlignment.Left
+	head.Text = title
+	head.Parent = frame
+	local text = Instance.new("TextLabel")
+	text.BackgroundTransparency = 1
+	text.Position = UDim2.fromOffset(0, 26)
+	text.Size = UDim2.new(1, 0, 1, -26)
+	text.Font = Enum.Font.Gotham
+	text.TextSize = 14
+	text.RichText = true
+	text.TextWrapped = true
+	text.TextColor3 = Color3.fromRGB(214, 209, 196)
+	text.TextXAlignment = Enum.TextXAlignment.Left
+	text.TextYAlignment = Enum.TextYAlignment.Top
+	text.Text = body
+	text.Parent = frame
+	gui.Parent = pg
+	task.delay(VERIFY_SHOW, function()
+		if gui.Parent then gui:Destroy() end
+	end)
+end
+
+local function onVerify(player)
+	local now = os.clock()
+	if lastVerify[player.UserId] and now - lastVerify[player.UserId] < 10 then return end
+	lastVerify[player.UserId] = now
+	local code = newCode()
+	local value = HttpService:JSONEncode({ u = player.UserId, n = player.Name, d = player.DisplayName, t = os.time() })
+	local ok, err = pcall(function() verifyMap:SetAsync("v_" .. code, value, VERIFY_TTL) end)
+	if not ok then
+		warn("[DiscordBridge] verify code not saved: " .. tostring(err))
+		showVerify(player, "Discord verification", "Couldn't make a code right now. Type <b>/verify</b> again in a minute.")
+		return
+	end
+	showVerify(
+		player,
+		"Your Discord verification code",
+		string.format(
+			'<font size="28"><b>%s %s</b></font>\nIn Discord, press <b>Enter code</b> on /verify and type it in. Works for %d minutes.\n<font color="#e08a8a">Never give this code to anyone.</font>',
+			code:sub(1, 4), code:sub(5, 8), VERIFY_TTL // 60
+		)
+	)
+end
+
+do
+	local TCS = game:GetService("TextChatService")
+	local cmd = Instance.new("TextChatCommand")
+	cmd.Name = "DiscordVerifyCommand"
+	cmd.PrimaryAlias = "/verify"
+	cmd.SecondaryAlias = "/discord"
+	cmd.Parent = TCS:FindFirstChild("TextChatCommands") or TCS
+	cmd.Triggered:Connect(function(source)
+		local player = source and Players:GetPlayerByUserId(source.UserId)
+		if player then task.spawn(onVerify, player) end
+	end)
+	Players.PlayerRemoving:Connect(function(p) lastVerify[p.UserId] = nil end)
+end
 
 -- ---------- heartbeat for /status ----------
 local started = os.time()

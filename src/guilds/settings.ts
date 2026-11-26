@@ -4,6 +4,14 @@ import type { AnnounceState } from '../sync/eventPlan.js';
 
 export type StaffTier = 1 | 2 | 3 | 4 | 5;
 
+/** Like Bloxlink's group binds: members whose rank in `groupId` is between min and max get `roleId`. */
+export interface RankBind {
+  roleId: string;
+  groupId: number;
+  min: number;
+  max: number;
+}
+
 /**
  * Settings for one Discord server, set with /setup. The bot works in any server it is in; each
  * server picks its own staff roles, audit channel and verified role here, so nothing in .env
@@ -16,6 +24,12 @@ export interface GuildSettings {
   auditChannelId?: string;
   /** role given here after /link verify */
   verifiedRoleId?: string;
+  /** role for members who aren't linked (taken away once they are) */
+  unverifiedRoleId?: string;
+  /** nickname for linked members, e.g. "{roblox}" or "{rank} | {roblox}"; empty = leave nicknames alone */
+  nicknameTemplate?: string;
+  /** roles from Roblox group ranks */
+  rankBinds?: RankBind[];
   /** mirror in-game events to and from this server's Events tab (default on) */
   eventSync?: boolean;
   /** channel with the event calendar and the event announcements */
@@ -28,6 +42,16 @@ export interface GuildSettings {
   eventState?: AnnounceState;
   /** in-game events this server removed from its Events tab without cancelling them in game */
   skipEventIds?: string[];
+  /** where /post and /ssu requests from below the approver tier wait for approval */
+  approvalChannelId?: string;
+  /** default channel for /post */
+  postChannelId?: string;
+  /** default channel for /ssu (falls back to the post channel) */
+  ssuChannelId?: string;
+  /** SSU picture, relative to DATA_DIR (banners/<guildId>.<ext>) */
+  ssuBanner?: string;
+  /** lowest tier that can approve posts, or post without approval (default 3) */
+  postApproverTier?: StaffTier;
   updatedAt?: number;
   updatedBy?: string;
 }
@@ -39,7 +63,11 @@ export interface GuildSettingsStore {
 }
 
 const empty = (): GuildSettings => ({ staffRoles: {} });
-const copy = (s: GuildSettings): GuildSettings => ({ ...s, staffRoles: { ...s.staffRoles } });
+const copy = (s: GuildSettings): GuildSettings => ({
+  ...s,
+  staffRoles: { ...s.staffRoles },
+  rankBinds: s.rankBinds?.map((b) => ({ ...b })),
+});
 
 export class MemoryGuildSettingsStore implements GuildSettingsStore {
   protected readonly guilds = new Map<string, GuildSettings>();
