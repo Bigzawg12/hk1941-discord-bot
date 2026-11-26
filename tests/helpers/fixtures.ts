@@ -61,6 +61,7 @@ export function testServices(routes: Route[], envOver: Env = {}): { services: Se
     linkStore: new MemoryLinkStore(),
     guildStore: new MemoryGuildSettingsStore(),
     postStore: new MemoryPostStore(),
+    adminLogFile: null,
     sleep: async () => undefined,
   });
   return { services, calls };

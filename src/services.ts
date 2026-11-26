@@ -18,6 +18,7 @@ import { MessagingPublisher } from './roblox/messaging.js';
 import { ProfileReader } from './roblox/profiles.js';
 import { ServerDirectory } from './roblox/servers.js';
 import { UsersClient } from './roblox/users.js';
+import { AdminLogArchive } from './game/adminLogArchive.js';
 import { EventSync } from './sync/eventSync.js';
 import type { Services } from './types.js';
 
@@ -26,6 +27,8 @@ export interface ServiceOverrides {
   linkStore?: LinkStore;
   guildStore?: GuildSettingsStore;
   postStore?: PostStore;
+  /** where the copy of the in-game admin log is kept; null = memory only (tests) */
+  adminLogFile?: string | null;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -59,13 +62,22 @@ export function createServices(config: BotConfig, logger: Logger, overrides: Ser
 
   const nowSec = overrides.now ? () => Math.floor(overrides.now!() / 1000) : undefined;
 
+  const global = new GlobalData(ds, config.roblox.globalStore, nowSec);
   const services: Services = {
     config,
     logger,
     users,
     groups,
     profiles: new ProfileReader(ds, config.roblox.profileStore),
-    global: new GlobalData(ds, config.roblox.globalStore, nowSec),
+    global,
+    adminLog: new AdminLogArchive(
+      async () => {
+        global.invalidate('HK1941_AdminLog', 'recent');
+        return global.adminLog();
+      },
+      overrides.adminLogFile === undefined ? join(config.dataDir, 'admin-log.json') : overrides.adminLogFile,
+      overrides.now,
+    ),
     bridge: new BridgeClient({
       publisher: new MessagingPublisher(openCloud, config.roblox.universeId),
       acks: sortedMaps,

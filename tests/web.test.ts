@@ -6,6 +6,12 @@ import { json } from './helpers/mockFetch.js';
 import { fakeGuild } from './helpers/guild.js';
 
 const ADMIN = '123456789012345678';
+const GAME_LOG = [
+  { t: 1_795_700_300, by: 'Pte_Target', text: ';kick Pte_X spawn killing' },
+  { t: 1_795_700_200, by: 'Sgt_Mod (Discord)', text: 'ban 123 1 day (griefing)' },
+  { t: 1_795_700_100, by: 'server', text: 'battle lock lifted automatically' },
+  { t: 1_795_700_000, by: 'Someone', text: ';announce =cmd|hello' },
+];
 const WEB_ENV = {
   DISCORD_CLIENT_SECRET: 'test-client-secret',
   SESSION_SECRET: 'x'.repeat(40),
@@ -35,13 +41,20 @@ async function start(who = { id: ADMIN }) {
       ['GET', '/cloud/v2/groups/409406376/roles', json({ groupRoles: [{ id: '5', displayName: 'Corporal', rank: 5 }] })],
       ['POST', 'users.roblox.com/v1/usernames/users', json({ data: [{ id: 99, name: 'Pte_Target', displayName: 'T' }] })],
       ['GET', 'groups.roblox.com/v2/users/99/groups/roles', json({ data: [] })],
+      // HK1941_Global: the in-game admin log and staff list
+      ['GET', 'standard-datastores/datastore/entries/entry', (url) => {
+        const key = url.searchParams.get('entryKey');
+        if (key === 'HK1941_AdminLog/recent') return json(GAME_LOG);
+        if (key === 'HK1941_Staff/list') return json({ '77': { tier: 2, name: 'Sgt_Mod' } });
+        return { status: 404, json: { error: 'NOT_FOUND' } };
+      }],
     ],
     WEB_ENV,
   );
   const fc = fakeClient();
   const { guild } = fakeGuild();
   fc.client.guilds.cache.set(IDS.guild, guild);
-  const dash = createDashboard({ services, client: () => fc.client as never, fetch: discordFetch(who) as never });
+  const dash = createDashboard({ services, client: () => fc.client as never, fetch: discordFetch(who) as never, gameLogPollMs: 0 });
   open.push(dash);
   const port = await dash.listen(0, '127.0.0.1');
   const base = `http://127.0.0.1:${port}`;
@@ -122,7 +135,7 @@ describe('admin dashboard', () => {
     const { signIn, csrf, post, req, services } = await start();
     await signIn();
     const token = await csrf(`/servers/${IDS.guild}`);
-    const page = await (await req(`/servers/${IDS.guild}`)).text();
+    const page = await (await req(`/servers/${IDS.guild}?tab=binds`)).text();
     expect(page).toContain('HK1941 Test');
     expect(page).toContain('5 Corporal');
     await post(`/servers/${IDS.guild}`, { _csrf: token, action: 'bind', roleId: '700000000000000003', min: '5', max: '6', groupId: '409406376' });
@@ -132,6 +145,9 @@ describe('admin dashboard', () => {
     expect(s.approvalChannelId).toBe('800000000000000001');
     expect(s.auditChannelId).toBeUndefined(); // only channels in that server are accepted
     expect(await (await req(`/servers/${IDS.guild}`)).text()).toContain('Channels saved');
+    // forms return to the tab they came from
+    const back = await post(`/servers/${IDS.guild}`, { _csrf: token, action: 'unbind', tab: 'binds', roleId: '700000000000000003', groupId: '409406376' });
+    expect(back.headers.get('location')).toBe(`/servers/${IDS.guild}?tab=binds`);
   });
 
   it('links and unlinks accounts by hand', async () => {
@@ -152,5 +168,67 @@ describe('admin dashboard', () => {
     const text = await (await req('/links')).text();
     expect(text).not.toContain('<script>x');
     expect(text).toContain('&lt;script&gt;x');
+  });
+
+  it('returns to the page asked for after sign-in, never to /favicon.ico', async () => {
+    const { req, signIn } = await start();
+    await req('/game-log');
+    await req('/favicon.ico'); // the browser asks for this in the background
+    const back = await signIn();
+    expect(back.headers.get('location')).toBe('/game-log');
+    const icon = await req('/favicon.ico');
+    expect(icon.headers.get('content-type')).toBe('image/svg+xml');
+  });
+
+  it('shows waiting posts on the Approvals tab and rejects from there', async () => {
+    const { signIn, csrf, post, req, services } = await start();
+    await signIn();
+    await services.posts.put({
+      id: 'abc123', guildId: IDS.guild, channelId: '800000000000000001', authorId: IDS.staffUser, createdAt: Date.now() - 60_000, status: 'pending',
+      draft: { type: 'post', kind: 'recruitment', title: 'Join the <b>Grenadiers</b>', body: 'We are recruiting.', buttons: [{ label: 'Apply', url: 'javascript:alert(1)' }], colour: 1, ping: { kind: 'here' } },
+    });
+    const page = await (await req('/approvals')).text();
+    expect(page).toContain('Join the &lt;b&gt;Grenadiers&lt;/b&gt;');
+    expect(page).toContain('We are recruiting.');
+    expect(page).toContain('@here');
+    expect(page).not.toContain('javascript:alert');
+    expect(page).toMatch(/class="count">1</); // the sidebar count
+    const token = await csrf('/approvals');
+    const res = await post('/approvals', { _csrf: token, action: 'decide', id: 'abc123', decision: 'reject', reason: 'Too long' });
+    expect(res.headers.get('location')).toBe('/approvals');
+    expect((await services.posts.get('abc123'))?.status).toBe('rejected');
+    const after = await (await req('/approvals')).text();
+    expect(after).toContain('All caught up');
+    expect(after).toContain('Rejected');
+  });
+
+  it('shows the in-game admin log with linked Discord accounts, filters and CSV', async () => {
+    const { signIn, req, services } = await start();
+    await signIn();
+    await services.links.linkVerified(IDS.staffUser, { id: 99, name: 'Pte_Target' }, 'game');
+    await services.links.linkVerified(IDS.otherUser, { id: 77, name: 'Sgt_Renamed' }, 'game'); // matched by the staff list's user id
+    const page = await (await req('/game-log')).text();
+    expect(page).toContain('Pte_Target');
+    expect(page).toContain(IDS.staffUser);
+    expect(page).toContain(IDS.otherUser);
+    expect(page).toContain('via Discord');
+    expect(page).toContain('Game (automatic)');
+    expect(page).toContain('spawn killing');
+    expect((await services.adminLog.list()).length).toBe(4);
+
+    const kicks = await (await req('/game-log?cmd=kick')).text();
+    expect(kicks).toContain('spawn killing');
+    expect(kicks).not.toContain('griefing');
+    const fromDiscord = await (await req('/game-log?src=discord')).text();
+    expect(fromDiscord).toContain('griefing');
+    expect(fromDiscord).not.toContain('spawn killing');
+
+    const csv = await req('/game-log.csv');
+    expect(csv.headers.get('content-type')).toContain('text/csv');
+    const text = await csv.text();
+    const lines = text.split(String.fromCharCode(13, 10));
+    expect(lines[0]).toBe('time_utc,roblox_name,roblox_id,discord_id,command,text,run_from');
+    expect(text).toContain(`Pte_Target,99,${IDS.staffUser},kick,;kick Pte_X spawn killing,game`);
+    expect(lines.find((l) => l.includes('announce'))).toContain(',announce,;announce =cmd|hello,game');
   });
 });

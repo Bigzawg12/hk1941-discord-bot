@@ -229,9 +229,11 @@ Links and server settings are kept in the `bot-data` volume. Logs are JSON on st
 A private website built into the bot, for you and your co-owner. It's on when `DISCORD_CLIENT_SECRET` and `SESSION_SECRET` are set, and only the Discord accounts in `DASHBOARD_ADMIN_IDS` (else `OWNER_DISCORD_IDS`) can sign in. Everyone else sees "not on the admin list".
 
 What it does:
-- **Overview:** live game servers and players, how many Discord servers and linked accounts, and everything waiting for approval.
-- **Servers:** for each Discord server: approve or reject waiting posts and SSUs; set channels (audit, event calendar, approval queue, posts, SSUs); verified and unverified roles, nickname template and rank binds (with the army ranks listed); post a Verify panel; staff roles; who approves posts; event ping and sync.
-- **Linked accounts:** search by Discord ID or Roblox name, update someone's roles, unlink them, or link someone by hand.
+- **Overview:** live game servers and players, what's waiting for approval, and the latest in-game commands.
+- **Approvals:** every waiting post and SSU, from every server, with a full preview. Approve (it posts straight away) or reject with a reason that's sent to the author. Recently decided ones are listed below.
+- **Game log:** every admin command run in game (`;kick`, `;ban`, `;award`…) and those sent from Discord, with the Roblox name, their linked Discord account, and the command. Search and filter by person, command or where it was run from, and download it as CSV. The game keeps only its latest 200 commands, so the bot saves a copy every 3 minutes to `DATA_DIR/admin-log.json` (up to 20,000).
+- **Servers:** a card per Discord server showing what's set up. Each server has tabs for channels, verification (roles, nickname, Verify panel), rank binds, staff roles, and posts and events.
+- **Linked accounts:** search by Discord or Roblox name or ID, update someone's roles, unlink them, or link someone by hand.
 
 Every change goes to the audit log, marked "(dashboard)".
 

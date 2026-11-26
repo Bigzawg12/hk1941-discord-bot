@@ -15,6 +15,7 @@ import type { Logger } from './logger.js';
 import type { PermissionResolver, ResolvedTier } from './permissions/resolver.js';
 import type { Tier } from './permissions/tiers.js';
 import type { PostStore } from './posts/store.js';
+import type { AdminLogArchive } from './game/adminLogArchive.js';
 import type { GlobalData } from './roblox/globalData.js';
 import type { GroupsClient } from './roblox/groups.js';
 import type { ProfileReader } from './roblox/profiles.js';
@@ -41,6 +42,8 @@ export interface Services {
   eventSync: EventSync;
   /** posts and SSUs waiting for approval */
   posts: PostStore;
+  /** the bot's longer copy of HKAdmin's in-game command log */
+  adminLog: AdminLogArchive;
   /** filled in by the loader */
   commands: Map<string, Command>;
 }
