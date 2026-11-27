@@ -15,6 +15,7 @@ ENV NODE_ENV=production \
 COPY --from=build /app/package.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
+COPY assets ./assets
 RUN mkdir -p /app/data && chown -R node:node /app/data
 USER node
 VOLUME ["/app/data"]

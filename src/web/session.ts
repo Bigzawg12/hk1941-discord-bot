@@ -17,6 +17,8 @@ export interface Session {
   user?: WebUser;
   /** the Discord sign-in in progress */
   oauth?: { state: string; next?: string };
+  /** the dashboard is dark unless this is 'light' */
+  theme?: 'light';
   /** one-off message for the next page */
   flash?: { kind: 'ok' | 'bad'; text: string };
 }

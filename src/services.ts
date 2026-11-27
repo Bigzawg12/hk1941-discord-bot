@@ -8,6 +8,7 @@ import { LinkService, type GameCode } from './linking/service.js';
 import { JsonFileLinkStore, type LinkStore } from './linking/store.js';
 import type { Logger } from './logger.js';
 import { PermissionResolver } from './permissions/resolver.js';
+import { JsonFilePanelStore, type PanelStore } from './posts/panelStore.js';
 import { JsonFilePostStore, type PostStore } from './posts/store.js';
 import { DataStoreReader } from './roblox/datastores.js';
 import { GlobalData } from './roblox/globalData.js';
@@ -27,6 +28,7 @@ export interface ServiceOverrides {
   linkStore?: LinkStore;
   guildStore?: GuildSettingsStore;
   postStore?: PostStore;
+  panelStore?: PanelStore;
   /** where the copy of the in-game admin log is kept; null = memory only (tests) */
   adminLogFile?: string | null;
   now?: () => number;
@@ -99,6 +101,7 @@ export function createServices(config: BotConfig, logger: Logger, overrides: Ser
     audit: new AuditLog(logger, config.discord.auditChannelId, guilds),
     guilds,
     posts: overrides.postStore ?? new JsonFilePostStore(join(config.dataDir, 'posts.json'), overrides.now),
+    panels: overrides.panelStore ?? new JsonFilePanelStore(join(config.dataDir, 'panels.json')),
     commands: new Map(),
     eventSync: undefined as unknown as EventSync, // set just below: it needs the finished services
   };

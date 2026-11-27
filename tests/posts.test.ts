@@ -5,6 +5,7 @@ import { handleInteraction } from '../src/discord/dispatch.js';
 import { loadCommands } from '../src/loaders/commands.js';
 import {
   allowedMentionsFor,
+  collapseText,
   draftLabel,
   expandText,
   liveComponents,
@@ -18,6 +19,7 @@ import {
   type SsuDraft,
 } from '../src/posts/render.js';
 import { pickEvent } from '../src/posts/workflow.js';
+import { discordMarkdown } from '../src/web/markdown.js';
 import { fakeButton, fakeClient, fakeInteraction, fakeModal, IDS, replyText, testServices } from './helpers/fixtures.js';
 import { json, type Route } from './helpers/mockFetch.js';
 
@@ -144,6 +146,30 @@ describe('post layout', () => {
     expect(expandText(':crest: | See #apply-here, not #nope or :nope:', guild)).toBe('<:crest:123456789012345678> | See <#223456789012345678>, not #nope or :nope:');
     expect(expandText('<:crest:123456789012345678>', guild)).toBe('<:crest:123456789012345678>');
     expect(expandText('## Heading', guild)).toBe('## Heading');
+  });
+
+  it('turns this server’s emoji and channel links back into what you’d type, for editing', () => {
+    const guild = {
+      emojis: { cache: new Map([['1', { id: '123456789012345678', name: 'crest', animated: false }]]) },
+      channels: { cache: new Map([['2', { id: '223456789012345678', name: 'apply-here' }]]) },
+    };
+    expect(collapseText('<:crest:123456789012345678> see <#223456789012345678>, <#999999999999999999> and <:other:999999999999999999>', guild)).toBe(
+      ':crest: see #apply-here, <#999999999999999999> and <:other:999999999999999999>',
+    );
+  });
+
+  it('dashboard preview: Discord markdown, escaped, with only http(s) links', () => {
+    const out = discordMarkdown('## Head\n- **a** *b* __c__ ~~d~~\n> quote\n-# small\n[x](javascript:alert(1)) [ok](https://e.example/a_b_c) <img src=x>\n`**raw**`', {
+      channels: { cache: new Map() },
+    }).value;
+    expect(out).toContain('<div class="md-h2">Head</div>');
+    expect(out).toContain('<li><strong>a</strong> <em>b</em> <u>c</u> <s>d</s></li>');
+    expect(out).toContain('<div class="md-quote">quote</div>');
+    expect(out).toContain('<div class="md-small">small</div>');
+    expect(out).not.toContain('href="javascript');
+    expect(out).toContain('<a href="https://e.example/a_b_c" target="_blank" rel="noreferrer noopener">ok</a>');
+    expect(out).toContain('&lt;img src=x&gt;');
+    expect(out).toContain('<code>**raw**</code>');
   });
 
   it('reads link buttons and explains bad lines', () => {

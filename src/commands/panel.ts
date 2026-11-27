@@ -1,17 +1,9 @@
-import {
-  ButtonStyle,
-  ChannelType,
-  ComponentType,
-  InteractionContextType,
-  SlashCommandBuilder,
-  type ButtonInteraction,
-  type Message,
-  type ModalSubmitInteraction,
-} from 'discord.js';
+import { ChannelType, InteractionContextType, SlashCommandBuilder, type ButtonInteraction, type ModalSubmitInteraction } from 'discord.js';
 import { ephemeral } from '../discord/helpers.js';
 import { Tier } from '../permissions/tiers.js';
 import { imageFromAttachment, type ImageFile } from '../posts/images.js';
-import { buttonsToText, COLOUR_CHOICES, expandText, parseButtons, PANEL_COLOUR, renderPanel, type ColourName, type LinkButton } from '../posts/render.js';
+import { readPanel, savePanel } from '../posts/panels.js';
+import { collapseText, COLOUR_CHOICES, expandText, parseButtons, PANEL_COLOUR, type ColourName, type LinkButton } from '../posts/render.js';
 import { field, formState, modal, newToken, retryReply } from '../posts/workflow.js';
 import { defineCommand, type CommandContext } from '../types.js';
 import { UserFacingError } from '../util/errors.js';
@@ -23,6 +15,8 @@ interface PanelForm {
   messageId?: string;
   colour: number;
   image?: ImageFile;
+  /** picture link, when the panel has one instead of a file */
+  imageUrl?: string;
   values: Record<string, string>;
 }
 
@@ -44,25 +38,6 @@ export function parseMessageRef(text: string, here: string): { channelId: string
   if (link) return { channelId: link[2]!, messageId: link[3]! };
   const id = /^\s*(\d{15,25})\s*$/.exec(text);
   return id ? { channelId: here, messageId: id[1]! } : null;
-}
-
-function readPanel(msg: Message): { values: Record<string, string>; colour: number; image?: ImageFile } {
-  const e = msg.embeds[0];
-  if (!e) throw new UserFacingError("That message isn't an info panel.");
-  const buttons: LinkButton[] = [];
-  for (const row of msg.components) {
-    if (row.type !== ComponentType.ActionRow) continue;
-    for (const c of row.components) {
-      if (c.type === ComponentType.Button && c.style === ButtonStyle.Link && c.url) buttons.push({ label: c.label ?? 'Link', url: c.url });
-    }
-  }
-  const imgName = e.image?.url ? decodeURIComponent(new URL(e.image.url).pathname.split('/').pop() ?? '') : '';
-  const att = msg.attachments.find((a) => a.name === imgName) ?? (e.image ? msg.attachments.first() : undefined);
-  return {
-    values: { title: e.title ?? '', body: e.description ?? '', buttons: buttonsToText(buttons), footer: e.footer?.text ?? '' },
-    colour: e.color ?? PANEL_COLOUR,
-    image: att ? { attachment: att.url, name: att.name } : undefined,
-  };
 }
 
 /**
@@ -117,7 +92,8 @@ export default defineCommand({
         messageId: ref.messageId,
         colour: colourName ? COLOUR_CHOICES[colourName] : current.colour,
         image: newImage ?? current.image,
-        values: current.values,
+        imageUrl: newImage ? undefined : current.imageUrl,
+        values: { ...current.values, body: collapseText(current.values.body, interaction.guild) },
       };
     } else {
       form = {
@@ -153,27 +129,19 @@ export default defineCommand({
     }
     await interaction.deferReply(ephemeral);
     const tidy = (s: string) => expandText(s, interaction.guild);
-    const out = renderPanel(
-      {
-        title: tidy(form.values.title!),
-        body: tidy(form.values.body!),
-        footer: form.values.footer,
-        buttons,
-        colour: form.colour,
-        imageName: form.image?.name,
-      },
-      interaction.guild,
-    );
-    const ch = await interaction.client.channels.fetch(form.channelId).catch(() => null);
-    if (!ch?.isSendable()) return retryReply(interaction, `I can't post in <#${form.channelId}>. Give me View Channel, Send Messages, Embed Links and Attach Files there.`, `panel:reopen:${id}`);
     let url: string;
-    if (form.mode === 'edit' && form.messageId && 'messages' in ch) {
-      const msg = await ch.messages.fetch(form.messageId);
-      await msg.edit({ ...out, files: form.image ? [form.image] : [], attachments: [], allowedMentions: { parse: [] } });
-      url = msg.url;
-    } else {
-      const msg = await ch.send({ ...out, files: form.image ? [form.image] : [], allowedMentions: { parse: [] } });
-      url = msg.url;
+    try {
+      ({ url } = await savePanel(services, interaction.client, {
+        guild: interaction.guild ?? { id: interaction.guildId!, name: '' },
+        channelId: form.channelId,
+        messageId: form.mode === 'edit' ? form.messageId : undefined,
+        draft: { title: tidy(form.values.title!), body: tidy(form.values.body!), footer: form.values.footer, buttons, colour: form.colour, imageUrl: form.imageUrl },
+        image: form.image,
+        by: { id: interaction.user.id, name: interaction.user.username },
+      }));
+    } catch (err) {
+      if (err instanceof UserFacingError) return retryReply(interaction, err.message, `panel:reopen:${id}`);
+      throw err;
     }
     formState.delete(id);
     await services.audit.record({

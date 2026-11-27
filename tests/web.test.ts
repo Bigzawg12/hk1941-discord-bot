@@ -177,7 +177,104 @@ describe('admin dashboard', () => {
     const back = await signIn();
     expect(back.headers.get('location')).toBe('/game-log');
     const icon = await req('/favicon.ico');
-    expect(icon.headers.get('content-type')).toBe('image/svg+xml');
+    expect(icon.headers.get('content-type')).toBe('image/png'); // the group's crest
+  });
+
+  it('is dark by default, can switch to light, and serves the crest', async () => {
+    const { signIn, csrf, post, req } = await start();
+    await signIn();
+    const dark = await (await req('/game-log')).text();
+    expect(dark).toContain('data-theme="dark"');
+    expect(dark).toContain('src="/static/logo.png"');
+    const token = await csrf('/');
+    const res = await post('/theme', { _csrf: token, theme: 'light', back: '/game-log?src=game' });
+    expect(res.headers.get('location')).toBe('/game-log?src=game');
+    expect(await (await req('/')).text()).toContain('data-theme="light"');
+    expect((await post('/theme', { _csrf: token, theme: 'dark', back: '//evil.example' })).headers.get('location')).toBe('/');
+    const logo = await req('/static/logo.png');
+    expect(logo.headers.get('content-type')).toBe('image/png');
+    expect(Buffer.from(await logo.arrayBuffer()).subarray(1, 4).toString()).toBe('PNG');
+  });
+
+  it('panels: preview keeps the text, posting sends it, and it can be edited and deleted', async () => {
+    const { signIn, csrf, post, req, services, fc } = await start();
+    await signIn();
+    expect(await (await req('/panels')).text()).toContain('No panels yet');
+    const token = await csrf('/panels/new');
+    const form = {
+      _csrf: token,
+      guildId: IDS.guild,
+      channelId: '800000000000000001',
+      title: 'Server <Rules>',
+      body: '# Rules\n1. Be **nice**\n2. See #general',
+      buttons: 'Rulebook | https://example.com/rules',
+      footer: '',
+      colour: 'red',
+      imageUrl: '',
+    };
+    // preview: shown, not posted, text kept and escaped
+    const prev = await post('/panels/new', { ...form, action: 'preview' });
+    expect(prev.status).toBe(200);
+    const prevHtml = await prev.text();
+    expect(prevHtml).toContain('Server &lt;Rules&gt;');
+    expect(prevHtml).toContain('<strong>nice</strong>');
+    expect(prevHtml).toContain('<span class="md-mention">#general</span>');
+    expect(prevHtml).toContain('dc-embed c-red');
+    expect(fc.sent).toHaveLength(0);
+    // a bad button line: shown again with the text kept
+    const bad = await post('/panels/new', { ...form, buttons: 'Rulebook', action: 'save' });
+    const badHtml = await bad.text();
+    expect(badHtml).toContain('no &quot;|&quot;');
+    expect(badHtml).toContain('1. Be **nice**');
+    expect(fc.sent).toHaveLength(0);
+    // post it
+    const posted = await post('/panels/new', { ...form, action: 'save' });
+    expect(fc.sent).toHaveLength(1);
+    const sent = fc.sent[0]!;
+    expect(sent.channelId).toBe('800000000000000001');
+    const embed = (sent.payload.embeds as { toJSON(): { title: string; description: string; color: number; footer: { text: string } } }[])[0]!.toJSON();
+    expect(embed.title).toBe('Server <Rules>');
+    expect(embed.description).toContain('See <#800000000000000001>');
+    expect(embed.color).toBe(0xa33b3b);
+    expect(embed.footer.text).toBe('HK1941 Test');
+    expect(sent.payload.allowedMentions).toEqual({ parse: [] });
+    const [rec] = await services.panels.list();
+    expect(rec).toMatchObject({ guildId: IDS.guild, channelId: '800000000000000001', title: 'Server <Rules>', updatedBy: 'The Owner' });
+    expect(posted.headers.get('location')).toBe(`/panels/${rec!.messageId}`);
+    // the list and the editor (channel link shown as #general again)
+    expect(await (await req('/panels')).text()).toContain('Server &lt;Rules&gt;');
+    const editor = await (await req(`/panels/${rec!.messageId}`)).text();
+    expect(editor).toContain('2. See #general');
+    expect(editor).toContain('Rulebook | https://example.com/rules');
+    // edit in place
+    await post(`/panels/${rec!.messageId}`, { ...form, title: 'Rules v2', action: 'save' });
+    expect(fc.sent).toHaveLength(1);
+    expect(fc.edited).toHaveLength(1);
+    expect(fc.messages.get(rec!.messageId)!.embeds[0]!.title).toBe('Rules v2');
+    expect((await services.panels.get(rec!.messageId))?.title).toBe('Rules v2');
+    // delete needs the box ticked
+    await post(`/panels/${rec!.messageId}`, { _csrf: token, action: 'delete' });
+    expect(fc.deleted).toHaveLength(0);
+    await post(`/panels/${rec!.messageId}`, { _csrf: token, action: 'delete', confirm: '1' });
+    expect(fc.deleted).toEqual([rec!.messageId]);
+    expect(await services.panels.list()).toHaveLength(0);
+  });
+
+  it('panels: adds one already in Discord, only if the bot posted it', async () => {
+    const { signIn, csrf, post, req, services, fc } = await start();
+    await signIn();
+    const ch = await fc.client.channels.fetch('800000000000000001');
+    const old = await ch.send({ embeds: [{ title: 'Old rules', description: 'Be kind.', color: 1 }] });
+    const token = await csrf('/panels');
+    const res = await post('/panels', { _csrf: token, action: 'adopt', link: `https://discord.com/channels/${IDS.guild}/800000000000000001/${old.id}` });
+    expect(res.headers.get('location')).toBe(`/panels/${old.id}`);
+    expect((await services.panels.get(old.id))?.title).toBe('Old rules');
+    expect(await (await req(`/panels/${old.id}`)).text()).toContain('Be kind.');
+    old.author.id = '1';
+    await services.panels.remove(old.id);
+    await post('/panels', { _csrf: token, action: 'adopt', link: `https://discord.com/channels/${IDS.guild}/800000000000000001/${old.id}` });
+    expect(await services.panels.get(old.id)).toBeNull();
+    expect(await (await req('/panels')).text()).toContain('wasn’t posted by the bot');
   });
 
   it('shows waiting posts on the Approvals tab and rejects from there', async () => {

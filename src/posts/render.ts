@@ -136,6 +136,23 @@ export function expandText(text: string, guild?: GuildLookup | null): string {
   return out;
 }
 
+/**
+ * The other way round, for editing: this server's `<:emoji:id>` and `<#channel>` back to
+ * `:emoji:` and `#channel-name`, so the text box shows what someone would type.
+ */
+export function collapseText(text: string, guild?: GuildLookup | null): string {
+  if (!guild) return text;
+  const channels = new Map<string, string>();
+  for (const c of values(guild.channels?.cache)) if (c.name) channels.set(c.id, c.name);
+  const emojiIds = new Set(values(guild.emojis?.cache).map((e) => e.id));
+  return text
+    .replace(/<a?:([A-Za-z0-9_]{2,32}):(\d{15,25})>/g, (whole, name: string, id: string) => (emojiIds.has(id) ? `:${name}:` : whole))
+    .replace(/<#(\d{15,25})>/g, (whole, id: string) => {
+      const name = channels.get(id);
+      return name && /^[a-z0-9_-]{1,100}$/i.test(name) ? `#${name}` : whole;
+    });
+}
+
 /** Bold each line of a plain signature; leave it alone if it already has formatting. */
 export function formatSignature(sig: string): string {
   const lines = sig.split('\n').map((l) => l.trim()).filter(Boolean);
@@ -356,7 +373,16 @@ export interface PanelDraft {
   footer?: string;
   buttons: LinkButton[];
   colour: number;
+  /** file sent with the message ("attachment://<name>") */
   imageName?: string;
+  /** or a picture link (used when there is no file) */
+  imageUrl?: string;
+}
+
+/** The named colour closest to a panel's colour (for the dashboard's colour picker). */
+export function colourNameOf(colour: number): ColourName {
+  const names = Object.keys(COLOUR_CHOICES) as ColourName[];
+  return names.find((n) => COLOUR_CHOICES[n] === colour) ?? 'khaki';
 }
 
 export function renderPanel(d: PanelDraft, guild: { name: string; iconURL?: () => string | null } | null): {
@@ -367,5 +393,6 @@ export function renderPanel(d: PanelDraft, guild: { name: string; iconURL?: () =
   const footer = d.footer?.trim() || guild?.name;
   if (footer) embed.setFooter({ text: footer.slice(0, 2048), iconURL: guild?.iconURL?.() ?? undefined });
   if (d.imageName) embed.setImage(`attachment://${d.imageName}`);
+  else if (d.imageUrl) embed.setImage(d.imageUrl);
   return { embeds: [embed], components: d.buttons.length ? [linkRow(d.buttons)] : [] };
 }

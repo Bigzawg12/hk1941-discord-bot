@@ -1,9 +1,10 @@
 import { vi } from 'vitest';
-import type { ChatInputCommandInteraction } from 'discord.js';
+import { Collection, type ChatInputCommandInteraction } from 'discord.js';
 import { loadConfig, type BotConfig, type Env } from '../../src/config.js';
 import { MemoryGuildSettingsStore } from '../../src/guilds/settings.js';
 import { MemoryLinkStore } from '../../src/linking/store.js';
 import { silentLogger } from '../../src/logger.js';
+import { MemoryPanelStore } from '../../src/posts/panelStore.js';
 import { MemoryPostStore } from '../../src/posts/store.js';
 import { createServices } from '../../src/services.js';
 import type { Services } from '../../src/types.js';
@@ -61,6 +62,7 @@ export function testServices(routes: Route[], envOver: Env = {}): { services: Se
     linkStore: new MemoryLinkStore(),
     guildStore: new MemoryGuildSettingsStore(),
     postStore: new MemoryPostStore(),
+    panelStore: new MemoryPanelStore(),
     adminLogFile: null,
     sleep: async () => undefined,
   });
@@ -83,28 +85,93 @@ export interface FakeOptions {
   client?: FakeClient;
 }
 
-/** What the bot sent: channel posts and DMs. Every channel exists and accepts posts. */
+/** A message the bot posted, close enough to discord.js for reading, editing and deleting panels. */
+interface FakeMessage {
+  id: string;
+  channelId: string;
+  url: string;
+  author: { id: string };
+  createdTimestamp: number;
+  editedTimestamp: number | null;
+  embeds: { title: string | null; description: string | null; color: number | null; footer: { text: string } | null; image: { url: string } | null }[];
+  components: { type: number; components: { type: number; style?: number; label?: string; url?: string }[] }[];
+  attachments: Collection<string, { url: string; name: string }>;
+  edit: (p: Record<string, unknown>) => Promise<FakeMessage>;
+  delete: () => Promise<void>;
+}
+
+const asJson = (x: unknown) => (x && typeof (x as { toJSON?: unknown }).toJSON === 'function' ? (x as { toJSON(): unknown }).toJSON() : x);
+
+/** What the bot sent: channel posts, edits, deletions and DMs. Every channel exists and accepts posts. */
 export function fakeClient() {
   const sent: { channelId: string; payload: Record<string, unknown> }[] = [];
+  const edited: { channelId: string; messageId: string; payload: Record<string, unknown> }[] = [];
+  const deleted: string[] = [];
   const dms: { userId: string; payload: Record<string, unknown> }[] = [];
+  const messages = new Map<string, FakeMessage>();
   let n = 0;
   const guilds = new Map<string, unknown>();
+  const fill = (m: FakeMessage, p: Record<string, unknown>) => {
+    if ('embeds' in p) {
+      m.embeds = ((p.embeds as unknown[]) ?? []).map((e) => {
+        const j = asJson(e) as { title?: string; description?: string; color?: number; footer?: { text: string }; image?: { url: string } };
+        return { title: j.title ?? null, description: j.description ?? null, color: j.color ?? null, footer: j.footer ?? null, image: j.image ?? null };
+      });
+    }
+    if ('components' in p) m.components = ((p.components as unknown[]) ?? []).map(asJson) as FakeMessage['components'];
+    if ('files' in p) {
+      m.attachments = new Collection();
+      for (const f of (p.files as { name?: string }[]) ?? []) {
+        const name = f.name ?? 'file';
+        m.attachments.set(name, { url: `https://cdn.discordapp.com/attachments/1/2/${name}`, name });
+      }
+    }
+  };
+  const channel = (id: string) => ({
+    id,
+    guildId: IDS.guild,
+    isSendable: () => true,
+    send: vi.fn(async (payload: Record<string, unknown>) => {
+      sent.push({ channelId: id, payload });
+      const mid = String(900000000000000000n + BigInt(++n));
+      const m: FakeMessage = {
+        id: mid,
+        channelId: id,
+        url: `https://discord.com/channels/${IDS.guild}/${id}/${mid}`,
+        author: { id: IDS.client },
+        createdTimestamp: Date.now(),
+        editedTimestamp: null,
+        embeds: [],
+        components: [],
+        attachments: new Collection(),
+        edit: async (p) => {
+          edited.push({ channelId: id, messageId: mid, payload: p });
+          fill(m, p);
+          m.editedTimestamp = Date.now();
+          return m;
+        },
+        delete: async () => {
+          deleted.push(mid);
+          messages.delete(mid);
+        },
+      };
+      fill(m, payload);
+      messages.set(mid, m);
+      return m;
+    }),
+    messages: {
+      fetch: vi.fn(async (mid: string) => {
+        const m = messages.get(mid);
+        if (!m || m.channelId !== id) throw new Error('Unknown Message');
+        return m;
+      }),
+    },
+  });
   const client = {
     user: { id: IDS.client },
     isReady: () => true,
     guilds: { cache: guilds, fetch: vi.fn(async (id: string) => guilds.get(id) ?? null) },
-    channels: {
-      fetch: vi.fn(async (id: string) => ({
-        id,
-        guildId: IDS.guild,
-        isSendable: () => true,
-        send: vi.fn(async (payload: Record<string, unknown>) => {
-          sent.push({ channelId: id, payload });
-          const mid = String(900000000000000000n + BigInt(++n));
-          return { id: mid, url: `https://discord.com/channels/${IDS.guild}/${id}/${mid}` };
-        }),
-      })),
-    },
+    channels: { fetch: vi.fn(async (id: string) => channel(id)) },
     users: {
       cache: new Map<string, { username: string }>(),
       send: vi.fn(async (userId: string, payload: Record<string, unknown>) => {
@@ -112,7 +179,7 @@ export function fakeClient() {
       }),
     },
   };
-  return { client, sent, dms };
+  return { client, sent, edited, deleted, dms, messages };
 }
 export type FakeClient = ReturnType<typeof fakeClient>;
 

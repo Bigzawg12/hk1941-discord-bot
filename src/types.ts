@@ -14,6 +14,7 @@ import type { LinkService } from './linking/service.js';
 import type { Logger } from './logger.js';
 import type { PermissionResolver, ResolvedTier } from './permissions/resolver.js';
 import type { Tier } from './permissions/tiers.js';
+import type { PanelStore } from './posts/panelStore.js';
 import type { PostStore } from './posts/store.js';
 import type { AdminLogArchive } from './game/adminLogArchive.js';
 import type { GlobalData } from './roblox/globalData.js';
@@ -42,6 +43,8 @@ export interface Services {
   eventSync: EventSync;
   /** posts and SSUs waiting for approval */
   posts: PostStore;
+  /** info panels the bot posted, for the dashboard */
+  panels: PanelStore;
   /** the bot's longer copy of HKAdmin's in-game command log */
   adminLog: AdminLogArchive;
   /** filled in by the loader */

@@ -232,9 +232,12 @@ A private website built into the bot, for you and your co-owner. It's on when `D
 What it does:
 - **Overview:** live game servers and players, what's waiting for approval, and the latest in-game commands.
 - **Approvals:** every waiting post and SSU, from every server, with a full preview. Approve (it posts straight away) or reject with a reason that's sent to the author. Recently decided ones are listed below.
+- **Panels:** rules, guidebooks and other info panels. **New panel** has a full-size form (channel, title, text, link buttons, footer, colour, picture link) with a Discord-style preview; **Update preview** shows it without posting. Editing a panel changes the same Discord message, and **Delete** removes it. Panels posted with `/panel` appear here by themselves; older ones can be added by pasting their message link. Kept in `DATA_DIR/panels.json`.
 - **Game log:** every admin command run in game (`;kick`, `;ban`, `;award`…) and those sent from Discord, with the Roblox name, their linked Discord account, and the command. Search and filter by person, command or where it was run from, and download it as CSV. The game keeps only its latest 200 commands, so the bot saves a copy every 3 minutes to `DATA_DIR/admin-log.json` (up to 20,000).
 - **Servers:** a card per Discord server showing what's set up. Each server has tabs for channels, verification (roles, nickname, Verify panel), rank binds, staff roles, and posts and events.
 - **Linked accounts:** search by Discord or Roblox name or ID, update someone's roles, unlink them, or link someone by hand.
+
+It's dark by default; **Light mode** at the bottom of the sidebar switches it for your session. The group's crest (`assets/logo.png`) is the sidebar logo and the tab icon.
 
 Every change goes to the audit log, marked "(dashboard)".
 

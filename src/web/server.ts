@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { ChannelType, type Client, type Guild } from 'discord.js';
@@ -7,7 +8,20 @@ import type { GuildSettings, StaffTier } from '../guilds/settings.js';
 import { describeSync, NICKNAME_TOKENS, syncEverywhere } from '../linking/memberSync.js';
 import type { AccountLink } from '../linking/store.js';
 import { TIER_NAMES } from '../permissions/tiers.js';
-import { draftLabel, POST_KINDS, type Draft } from '../posts/render.js';
+import type { ImageFile } from '../posts/images.js';
+import { fetchPanelMessage, readPanel, savePanel } from '../posts/panels.js';
+import {
+  collapseText,
+  COLOUR_CHOICES,
+  colourNameOf,
+  draftLabel,
+  expandText,
+  parseButtons,
+  POST_KINDS,
+  type ColourName,
+  type Draft,
+  type PanelDraft,
+} from '../posts/render.js';
 import type { PendingPost } from '../posts/store.js';
 import { decideFromDashboard, DEFAULT_APPROVER_TIER } from '../posts/workflow.js';
 import type { FetchLike } from '../roblox/http.js';
@@ -33,6 +47,7 @@ import {
   type Option,
   type Tone,
 } from './html.js';
+import { discordMarkdown } from './markdown.js';
 import { DiscordOAuth, OAuthError, randomState } from './oauth.js';
 import { sameToken, SessionStore, type Session } from './session.js';
 
@@ -72,12 +87,20 @@ class Raw {
 }
 
 const MAX_BODY = 64 * 1024;
+/** The group's crest (assets/logo.png), shown in the sidebar, on the sign-in page and as the tab icon. */
+const LOGO: Buffer | null = (() => {
+  try {
+    return readFileSync(new URL('../../assets/logo.png', import.meta.url));
+  } catch {
+    return null;
+  }
+})();
 const PAGE_SIZE = 50;
 const startedAt = Date.now();
 /** Game log: read the game again when the page is opened and the copy is older than this. */
 const GAME_LOG_FRESH_MS = 60_000;
 /** Pages a sign-in may return to (never /favicon.ico and the like). */
-const RETURNABLE = /^\/(approvals|game-log|servers(\/\d{15,25})?|links)?$/;
+const RETURNABLE = /^\/(approvals|game-log|servers(\/\d{15,25})?|panels(\/new|\/\d{15,25})?|links)?$/;
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -186,7 +209,7 @@ export function createDashboard(deps: DashboardDeps) {
 
   async function page(r: Req, opts: { title: string; nav?: string; body: Html }): Promise<string> {
     const approvals = (await pendingPosts().catch(() => [])).length;
-    return layout({ ...opts, session: r.session, counts: { approvals } });
+    return layout({ ...opts, session: r.session, counts: { approvals }, path: r.url.pathname + r.url.search });
   }
 
   /** Discord name and avatar; fetches at most `budget.n` users that aren't cached yet. */
@@ -238,12 +261,13 @@ export function createDashboard(deps: DashboardDeps) {
       session: s,
       bare: true,
       body: html`<div class="login"><div class="login-card">
-        ${icon('shield', 'ic brand-ic')}
-        <h1>HK1941 dashboard</h1>
+        <img class="login-logo" src="/static/logo.png" alt="" width="88" height="88">
+        <h1>Hong Kong 1941</h1>
+        <p class="kicker">Staff dashboard</p>
         ${
           denied
-            ? html`<p class="flash bad">${icon('x')}<span>That Discord account isn't on the dashboard's admin list.</span></p>`
-            : html`<p class="muted">For the server owners only. Sign in with your Discord account to continue.</p>`
+            ? html`<p class="flash bad">That Discord account isn't on the dashboard's admin list.</p>`
+            : html`<p class="muted">Sign in with your Discord account to continue.</p>`
         }
         <a class="btn" href="/auth/discord">Sign in with Discord</a>
       </div></div>`,
@@ -273,10 +297,10 @@ export function createDashboard(deps: DashboardDeps) {
         return html`<li><span class="grow"><span class="title">${e.by}${e.viaDiscord ? html` ${badge('via Discord', 'info')}` : ''}</span><span class="cmd">${e.text}</span></span><span class="muted nowrap">${discord ? discord.name : ''}<br><small>${ago(now() - e.t * 1000)}</small></span></li>`;
       }),
     );
-    const stat = (href: string | null, ic: string, tone: string, n: string | number, label: string, extra = '') =>
+    const stat = (href: string | null, _ic: string, tone: string, n: string | number, label: string, extra = '') =>
       href
-        ? html`<a class="stat" href="${href}"><span class="stat-ic ${tone}">${icon(ic)}</span><span><span class="stat-n">${n}</span><span class="stat-l">${label}${extra}</span></span></a>`
-        : html`<div class="stat"><span class="stat-ic ${tone}">${icon(ic)}</span><span><span class="stat-n">${n}</span><span class="stat-l">${label}${extra}</span></span></div>`;
+        ? html`<a class="stat ${tone}" href="${href}"><span class="stat-n">${n}</span><span class="stat-l">${label}${extra}</span></a>`
+        : html`<div class="stat ${tone}"><span class="stat-n">${n}</span><span class="stat-l">${label}${extra}</span></div>`;
     return page(r, {
       title: 'Overview',
       nav: 'home',
@@ -732,6 +756,321 @@ export function createDashboard(deps: DashboardDeps) {
     });
   }
 
+  // ---------- panels ----------
+
+  interface PanelValues {
+    guildId: string;
+    channelId: string;
+    title: string;
+    body: string;
+    buttons: string;
+    footer: string;
+    colour: ColourName;
+    imageUrl: string;
+    keepImage: boolean;
+  }
+
+  const COLOUR_OPTIONS: Option[] = (Object.keys(COLOUR_CHOICES) as ColourName[]).map((c) => ({ value: c, label: c[0]!.toUpperCase() + c.slice(1) }));
+  const panelLink = (p: { guildId: string; channelId: string; messageId: string }) => `https://discord.com/channels/${p.guildId}/${p.channelId}/${p.messageId}`;
+  const onDiscordCdn = (u: string) => /^https:\/\/(cdn|media)\.discordapp\.(com|net)\//i.test(u);
+
+  function readPanelForm(f: Record<string, string>): PanelValues {
+    const colour = (f.colour ?? '') as ColourName;
+    return {
+      guildId: (f.guildId ?? '').trim(),
+      channelId: (f.channelId ?? '').trim(),
+      title: (f.title ?? '').trim().slice(0, 256),
+      body: (f.body ?? '').replace(/\r\n?/g, '\n').trim().slice(0, 4000),
+      buttons: (f.buttons ?? '').replace(/\r\n?/g, '\n').trim().slice(0, 1000),
+      footer: (f.footer ?? '').trim().slice(0, 200),
+      colour: colour in COLOUR_CHOICES ? colour : 'khaki',
+      imageUrl: (f.imageUrl ?? '').trim().slice(0, 500),
+      keepImage: f.keepImage === '1',
+    };
+  }
+
+  /** Check the form and turn it into what Discord gets. Throws UserFacingError with what to fix. */
+  function panelDraft(v: PanelValues, guild: Guild): PanelDraft {
+    if (!v.title) throw new UserFacingError('Give the panel a title.');
+    if (!v.body) throw new UserFacingError('The panel needs some text.');
+    if (v.imageUrl) {
+      let ok = false;
+      try {
+        ok = new URL(v.imageUrl).protocol === 'https:';
+      } catch {
+        ok = false;
+      }
+      if (!ok) throw new UserFacingError('The picture link must be a full link starting with https://');
+    }
+    return {
+      title: expandText(v.title, guild),
+      body: expandText(v.body, guild),
+      footer: v.footer || undefined,
+      buttons: parseButtons(v.buttons),
+      colour: COLOUR_CHOICES[v.colour],
+      imageUrl: v.imageUrl || undefined,
+    };
+  }
+
+  /** Roughly what Discord will show. */
+  function panelPreview(v: PanelValues, guild: Guild, currentImage?: string): Html {
+    if (!v.title && !v.body) return html`<p class="muted">Start typing and press <b>Update preview</b> to see the panel here.</p>`;
+    let buttons: { label: string; url: string }[] = [];
+    let buttonError = '';
+    try {
+      buttons = parseButtons(v.buttons);
+    } catch (err) {
+      buttonError = err instanceof Error ? err.message : String(err);
+    }
+    const img = v.keepImage && currentImage ? currentImage : v.imageUrl;
+    const iconUrl = typeof guild.iconURL === 'function' ? guild.iconURL({ size: 32 }) : null;
+    return html`<div class="dc">
+      <div class="dc-embed c-${v.colour}">
+        ${v.title ? html`<div class="dc-title">${v.title}</div>` : ''}
+        <div class="dc-body">${discordMarkdown(expandText(v.body, guild), guild)}</div>
+        ${img ? (onDiscordCdn(img) ? html`<img class="dc-img" src="${img}" alt="Panel picture">` : html`<p class="dc-note">Picture: ${img}</p>`) : ''}
+        <div class="dc-foot">${iconUrl ? html`<img src="${iconUrl}" alt="" width="20" height="20">` : ''}<span>${v.footer || guild.name}</span></div>
+      </div>
+      ${buttons.length ? html`<div class="dc-buttons">${buttons.map((b) => html`<a class="dc-btn" href="${safeUrl(b.url)}" target="_blank" rel="noreferrer noopener">${b.label} ${icon('external', 'ic sm')}</a>`)}</div>` : ''}
+      ${buttonError ? html`<p class="flash bad">${buttonError}</p>` : ''}
+    </div>`;
+  }
+
+  function panelEditor(
+    r: Req,
+    guild: Guild,
+    v: PanelValues,
+    opts: { mode: 'new' | 'edit'; messageId?: string; currentImage?: string; error?: string },
+  ): Promise<string> {
+    const editing = opts.mode === 'edit';
+    const chName = guild.channels.cache.get(v.channelId)?.name;
+    const action = editing ? `/panels/${opts.messageId}` : '/panels/new';
+    const form = html`<form method="post" action="${action}" class="panel-form">
+      ${csrfField(r.session)}<input type="hidden" name="guildId" value="${guild.id}">
+      ${
+        editing
+          ? html`<input type="hidden" name="channelId" value="${v.channelId}"><p class="muted">In <b>${chName ? `#${chName}` : 'an unknown channel'}</b> on ${guild.name}. <a href="${panelLink({ guildId: guild.id, channelId: v.channelId, messageId: opts.messageId! })}" target="_blank" rel="noreferrer noopener">Open in Discord</a></p>`
+          : field('Channel', 'channelId', select('channelId', channelOptions(guild), v.channelId, { none: '— pick a channel —' }), 'The bot needs View Channel, Send Messages, Embed Links and Attach Files there.')
+      }
+      ${field('Title', 'title', html`<input id="title" name="title" maxlength="256" required value="${v.title}" placeholder="Server Rules">`)}
+      ${field(
+        'Text',
+        'body',
+        html`<textarea id="body" name="body" rows="16" maxlength="4000" required placeholder="1. Be respectful.&#10;2. No exploiting.">${v.body}</textarea>`,
+        'Discord formatting works: **bold**, *italic*, # Heading, - lists, [link text](https://…). Type #channel-name for a channel and :emoji_name: for one of the server’s emoji.',
+      )}
+      ${field('Link buttons', 'buttons', html`<textarea id="buttons" name="buttons" rows="3" maxlength="1000" placeholder="Full rulebook | https://docs.google.com/…">${v.buttons}</textarea>`, 'One per line, as Label | https://link. Up to 5.')}
+      <div class="fields">
+        ${field('Footer', 'footer', html`<input id="footer" name="footer" maxlength="200" value="${v.footer}" placeholder="${guild.name}">`, 'Leave empty to show the server name.')}
+        ${field('Colour', 'colour', select('colour', COLOUR_OPTIONS, v.colour, { none: null }))}
+      </div>
+      ${field('Picture link', 'imageUrl', html`<input id="imageUrl" name="imageUrl" type="url" maxlength="500" value="${v.imageUrl}" placeholder="https://…">`, 'Optional. A direct link to a PNG, JPG or GIF, shown under the text.')}
+      ${opts.currentImage ? html`<label class="check"><input type="checkbox" name="keepImage" value="1"${v.keepImage ? new Html(' checked') : ''}> Keep the current picture (a new link replaces it)</label>` : ''}
+      <div class="btn-row">
+        <button name="action" value="save">${editing ? 'Save changes' : 'Post panel'}</button>
+        <button class="secondary" name="action" value="preview">Update preview</button>
+        <a class="btn ghost" href="/panels">Cancel</a>
+      </div>
+    </form>`;
+    const danger = editing
+      ? card(
+          'Delete',
+          html`<form method="post" action="${action}" class="row">${csrfField(r.session)}
+            <label class="check"><input type="checkbox" name="confirm" value="1" required> Delete this panel’s message from Discord</label>
+            <button class="danger" name="action" value="delete">Delete panel</button></form>`,
+        )
+      : '';
+    return page(r, {
+      title: editing ? `Edit: ${v.title || 'panel'}` : 'New panel',
+      nav: 'panels',
+      body: html`${pageHead(editing ? 'Edit panel' : 'New panel', html`<a href="/panels">Panels</a> / ${guild.name}`)}
+      ${opts.error ? html`<div class="flash bad" role="alert">${opts.error}</div>` : ''}
+      <div class="grid-2 panel-grid">
+        <div class="stack">${card(null, form)}${danger}</div>
+        ${card('Preview', panelPreview(v, guild, opts.currentImage), { action: html`<span class="muted">Roughly how Discord shows it</span>` })}
+      </div>`,
+    });
+  }
+
+  async function panelsPage(r: Req): Promise<string> {
+    const c = deps.client();
+    const list = await services.panels.list();
+    const rows = list.map((p) => {
+      const g = c?.guilds.cache.get(p.guildId);
+      const chName = g?.channels.cache.get(p.channelId)?.name;
+      return html`<tr>
+        <td><a class="strong" href="/panels/${p.messageId}">${p.title || '(no title)'}</a></td>
+        <td>${g?.name ?? p.guildId}</td>
+        <td>${chName ? `#${chName}` : html`<span class="muted">unknown</span>`}</td>
+        <td class="nowrap">${ago(now() - p.updatedAt)}<br><small class="muted">${p.updatedBy}</small></td>
+        <td class="nowrap right"><a class="btn sm secondary" href="/panels/${p.messageId}">Edit</a> <a class="btn sm ghost" href="${panelLink(p)}" target="_blank" rel="noreferrer noopener">Discord ${icon('external', 'ic sm')}</a></td>
+      </tr>`;
+    });
+    return page(r, {
+      title: 'Panels',
+      nav: 'panels',
+      body: html`${pageHead('Panels', 'Rules, guidebooks and other info posts. Editing one here changes the message in Discord, so links to it keep working.', html`<a class="btn" href="/panels/new">New panel</a>`)}
+      ${card(
+        null,
+        list.length
+          ? html`<div class="table-wrap"><table><thead><tr><th>Title</th><th>Server</th><th>Channel</th><th>Last changed</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
+          : empty('No panels yet', html`Post one with <b>New panel</b>, or add one that’s already in Discord below.`),
+        { flush: list.length > 0 },
+      )}
+      ${card(
+        'Add a panel that’s already in Discord',
+        html`<form method="post" action="/panels" class="row">${csrfField(r.session)}<input type="hidden" name="action" value="adopt">
+          ${field('Message link', 'link', html`<input id="link" name="link" required placeholder="https://discord.com/channels/…">`)}
+          <button class="secondary">Add to the list</button></form>
+          <p class="hint">In Discord, right-click the panel and pick Copy Message Link. Panels posted with /panel from now on are added by themselves.</p>`,
+      )}`,
+    });
+  }
+
+  async function newPanelPage(r: Req, v?: PanelValues, error?: string): Promise<string> {
+    const guilds = [...client().guilds.cache.values()].sort((a, b) => a.name.localeCompare(b.name));
+    const want = v?.guildId || r.url.searchParams.get('guild') || (guilds.length === 1 ? guilds[0]!.id : '');
+    const guild = want ? client().guilds.cache.get(want) : undefined;
+    if (!guild) {
+      return page(r, {
+        title: 'New panel',
+        nav: 'panels',
+        body: html`${pageHead('New panel', html`<a href="/panels">Panels</a>`)}
+        ${card(
+          'Which server?',
+          guilds.length
+            ? html`<form method="get" action="/panels/new" class="row">${field('Server', 'guild', select('guild', guilds.map((g) => ({ value: g.id, label: g.name })), undefined, { none: null }))}<button>Next</button></form>`
+            : empty('Not in any server yet', 'Invite the bot first.'),
+        )}`,
+      });
+    }
+    const values: PanelValues = v ?? { guildId: guild.id, channelId: '', title: '', body: '', buttons: '', footer: '', colour: 'khaki', imageUrl: '', keepImage: false };
+    return panelEditor(r, guild, values, { mode: 'new', error });
+  }
+
+  async function editPanelPage(r: Req, messageId: string, v?: PanelValues, error?: string): Promise<string> {
+    const rec = await services.panels.get(messageId);
+    if (!rec) throw new NotFound();
+    const guild = guildOr404(rec.guildId);
+    const msg = await fetchPanelMessage(client(), rec.guildId, rec.channelId, messageId);
+    if (!msg) {
+      return page(r, {
+        title: rec.title,
+        nav: 'panels',
+        body: html`${pageHead(rec.title || 'Panel', html`<a href="/panels">Panels</a> / ${guild.name}`)}
+        ${card(
+          null,
+          html`${empty('This panel’s message is gone', 'It was deleted in Discord, or the bot can no longer see its channel.')}
+          <form method="post" action="/panels/${messageId}" class="btn-row center">${csrfField(r.session)}<button class="secondary" name="action" value="forget">Remove it from the list</button></form>`,
+        )}`,
+      });
+    }
+    const current = readPanel(msg);
+    const values: PanelValues = v ?? {
+      guildId: guild.id,
+      channelId: rec.channelId,
+      title: current.values.title,
+      body: collapseText(current.values.body, guild),
+      buttons: current.values.buttons,
+      footer: current.values.footer === guild.name ? '' : current.values.footer,
+      colour: colourNameOf(current.colour),
+      imageUrl: current.imageUrl ?? '',
+      keepImage: !!current.image,
+    };
+    return panelEditor(r, guild, values, { mode: 'edit', messageId, currentImage: current.image ? String(current.image.attachment) : undefined, error });
+  }
+
+  /** Panel forms: a preview or a mistake shows the form again with the text kept; saving redirects. */
+  async function panelsPost(r: Req): Promise<string | Redirect> {
+    const path = r.url.pathname;
+    const f = r.form;
+    const by = { id: r.session.user!.id, name: r.session.user!.globalName ?? r.session.user!.username };
+
+    if (path === '/panels') {
+      if (f.action !== 'adopt') throw new UserFacingError('Unknown action.');
+      try {
+        const m = /channels\/(\d{15,25})\/(\d{15,25})\/(\d{15,25})/.exec(f.link ?? '');
+        if (!m) throw new UserFacingError('Paste the whole message link (right-click the panel → Copy Message Link).');
+        const [, guildId, channelId, messageId] = m as unknown as [string, string, string, string];
+        guildOr404(guildId);
+        const msg = await fetchPanelMessage(client(), guildId, channelId, messageId);
+        if (!msg) throw new UserFacingError("Can't find that message. The bot needs View Channel and Read Message History there.");
+        if (msg.author.id !== client().user?.id) throw new UserFacingError('That message wasn’t posted by the bot, so it can’t be edited.');
+        const content = readPanel(msg);
+        await services.panels.put({
+          messageId,
+          guildId,
+          channelId,
+          title: content.values.title,
+          createdBy: '',
+          createdAt: msg.createdTimestamp,
+          updatedAt: msg.editedTimestamp ?? msg.createdTimestamp,
+          updatedBy: 'Discord',
+        });
+        flash(r.session, 'ok', `Added "${content.values.title}".`);
+        return new Redirect(`/panels/${messageId}`);
+      } catch (err) {
+        if (!(err instanceof UserFacingError)) throw err;
+        flash(r.session, 'bad', err.message);
+        return new Redirect('/panels');
+      }
+    }
+
+    const v = readPanelForm(f);
+    if (path === '/panels/new') {
+      const guild = guildOr404(v.guildId);
+      if (f.action === 'preview') return newPanelPage(r, v);
+      try {
+        if (!channelOptions(guild).some((o) => o.value === v.channelId)) throw new UserFacingError('Pick the channel to post in.');
+        const { url, messageId } = await savePanel(services, client(), { guild, channelId: v.channelId, draft: panelDraft(v, guild), by });
+        await audit(r, 'Info panel posted', `"${v.title}" in <#${v.channelId}>: ${url}`, guild.id);
+        flash(r.session, 'ok', `Posted in #${guild.channels.cache.get(v.channelId)?.name ?? 'the channel'}.`);
+        return new Redirect(`/panels/${messageId}`);
+      } catch (err) {
+        if (!(err instanceof UserFacingError)) throw err;
+        return newPanelPage(r, v, err.message.replace(/<#(\d+)>/g, (_m, id: string) => `#${guild.channels.cache.get(id)?.name ?? id}`));
+      }
+    }
+
+    const m = /^\/panels\/(\d{15,25})$/.exec(path);
+    const rec = m ? await services.panels.get(m[1]!) : null;
+    if (!m || !rec) throw new NotFound();
+    const messageId = m[1]!;
+    if (f.action === 'forget') {
+      await services.panels.remove(messageId);
+      flash(r.session, 'ok', 'Removed from the list. Nothing was changed in Discord.');
+      return new Redirect('/panels');
+    }
+    if (f.action === 'delete') {
+      if (f.confirm !== '1') throw new UserFacingError('Tick the box to confirm.');
+      const msg = await fetchPanelMessage(client(), rec.guildId, rec.channelId, messageId);
+      if (msg) await msg.delete();
+      await services.panels.remove(messageId);
+      await audit(r, 'Info panel deleted', `"${rec.title}" in <#${rec.channelId}>`, rec.guildId);
+      flash(r.session, 'ok', `Deleted "${rec.title}".`);
+      return new Redirect('/panels');
+    }
+    const guild = guildOr404(rec.guildId);
+    v.guildId = rec.guildId;
+    v.channelId = rec.channelId;
+    if (f.action === 'preview') return editPanelPage(r, messageId, v);
+    try {
+      const draft = panelDraft(v, guild);
+      let image: ImageFile | undefined;
+      if (v.keepImage && !v.imageUrl) {
+        const msg = await fetchPanelMessage(client(), rec.guildId, rec.channelId, messageId);
+        image = msg ? readPanel(msg).image : undefined;
+      }
+      await savePanel(services, client(), { guild, channelId: rec.channelId, messageId, draft, image, by });
+      await audit(r, 'Info panel edited', `"${v.title}" in <#${rec.channelId}>: ${panelLink(rec)}`, guild.id);
+      flash(r.session, 'ok', 'Saved. The panel in Discord is updated.');
+      return new Redirect(`/panels/${messageId}`);
+    } catch (err) {
+      if (!(err instanceof UserFacingError)) throw err;
+      return editPanelPage(r, messageId, v, err.message);
+    }
+  }
+
   // ---------- actions ----------
 
   async function serverAction(r: Req, guild: Guild): Promise<void> {
@@ -923,6 +1262,12 @@ export function createDashboard(deps: DashboardDeps) {
       return new Redirect('/login');
     }
 
+    if (r.method === 'POST' && path === '/theme') {
+      s.theme = r.form.theme === 'light' ? 'light' : undefined;
+      const back = r.form.back ?? '/';
+      return new Redirect(back.startsWith('/') && !back.startsWith('//') && RETURNABLE.test(back.split('?')[0]!) ? back : '/');
+    }
+    if (r.method === 'POST' && (path === '/panels' || path.startsWith('/panels/'))) return panelsPost(r);
     if (r.method === 'POST') {
       const m = /^\/servers\/(\d{15,25})$/.exec(path);
       let back = path;
@@ -952,6 +1297,10 @@ export function createDashboard(deps: DashboardDeps) {
     const sm = /^\/servers\/(\d{15,25})$/.exec(path);
     if (sm) return serverPage(r, guildOr404(sm[1]!));
     if (path === '/links') return linksPage(r);
+    if (path === '/panels') return panelsPage(r);
+    if (path === '/panels/new') return newPanelPage(r);
+    const pm = /^\/panels\/(\d{15,25})$/.exec(path);
+    if (pm) return editPanelPage(r, pm[1]!);
     throw new NotFound();
   }
 
@@ -968,6 +1317,16 @@ export function createDashboard(deps: DashboardDeps) {
     if (url.pathname === '/static/style.css') {
       res.writeHead(200, { ...headers, 'content-type': 'text/css; charset=utf-8', 'cache-control': 'public, max-age=3600' });
       res.end(STYLE);
+      return;
+    }
+    if (url.pathname === '/static/logo.png' || (url.pathname === '/favicon.ico' && LOGO)) {
+      if (!LOGO) {
+        res.writeHead(404, headers);
+        res.end();
+        return;
+      }
+      res.writeHead(200, { ...headers, 'content-type': 'image/png', 'cache-control': 'public, max-age=86400' });
+      res.end(LOGO);
       return;
     }
     if (url.pathname === '/favicon.svg' || url.pathname === '/favicon.ico') {
