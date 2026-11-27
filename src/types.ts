@@ -17,6 +17,7 @@ import type { Tier } from './permissions/tiers.js';
 import type { PanelStore } from './posts/panelStore.js';
 import type { PostStore } from './posts/store.js';
 import type { AdminLogArchive } from './game/adminLogArchive.js';
+import type { PromotionLog } from './game/promotions.js';
 import type { GlobalData } from './roblox/globalData.js';
 import type { GroupsClient } from './roblox/groups.js';
 import type { ProfileReader } from './roblox/profiles.js';
@@ -47,6 +48,8 @@ export interface Services {
   panels: PanelStore;
   /** the bot's longer copy of HKAdmin's in-game command log */
   adminLog: AdminLogArchive;
+  /** rank changes made through the bot */
+  promotionLog: PromotionLog;
   /** filled in by the loader */
   commands: Map<string, Command>;
 }

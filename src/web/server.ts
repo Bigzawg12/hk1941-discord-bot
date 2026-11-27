@@ -4,10 +4,13 @@ import type { AddressInfo } from 'node:net';
 import { ChannelType, type Client, type Guild } from 'discord.js';
 import { verifyPanel } from '../commands/verify.js';
 import { commandOf, type GameLogEntry } from '../game/adminLogArchive.js';
+import { CERT_BY_ID, MAX_STRIPES, MEDAL_BY_ID, RANKS } from '../game/gameConfig.js';
+import { computePoints, hours, standing } from '../game/points.js';
+import { assignable, changeRank, nextRole, progressOf, rosterFor, type Roster } from '../game/promotions.js';
 import type { GuildSettings, StaffTier } from '../guilds/settings.js';
 import { describeSync, NICKNAME_TOKENS, syncEverywhere } from '../linking/memberSync.js';
 import type { AccountLink } from '../linking/store.js';
-import { TIER_NAMES } from '../permissions/tiers.js';
+import { Tier, TIER_NAMES } from '../permissions/tiers.js';
 import type { ImageFile } from '../posts/images.js';
 import { fetchPanelMessage, readPanel, savePanel } from '../posts/panels.js';
 import {
@@ -24,6 +27,7 @@ import {
 } from '../posts/render.js';
 import type { PendingPost } from '../posts/store.js';
 import { decideFromDashboard, DEFAULT_APPROVER_TIER } from '../posts/workflow.js';
+import type { GroupRole } from '../roblox/groups.js';
 import type { FetchLike } from '../roblox/http.js';
 import { profileUrl } from '../roblox/users.js';
 import type { Services } from '../types.js';
@@ -66,6 +70,8 @@ export interface DashboardDeps {
   now?: () => number;
   /** how often to copy the in-game admin log (ms); 0 = only when the Game log page is opened */
   gameLogPollMs?: number;
+  /** how long a Promotions page waits for a group scan before showing the last one (ms) */
+  scanWaitMs?: number;
 }
 
 interface Req {
@@ -100,7 +106,7 @@ const startedAt = Date.now();
 /** Game log: read the game again when the page is opened and the copy is older than this. */
 const GAME_LOG_FRESH_MS = 60_000;
 /** Pages a sign-in may return to (never /favicon.ico and the like). */
-const RETURNABLE = /^\/(approvals|game-log|servers(\/\d{15,25})?|panels(\/new|\/\d{15,25})?|links)?$/;
+const RETURNABLE = /^\/(approvals|promotions|members(\/\d{1,19})?|game-log|servers(\/\d{15,25})?|panels(\/new|\/\d{15,25})?|links)?$/;
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -207,7 +213,7 @@ export function createDashboard(deps: DashboardDeps) {
     return (await services.posts.list(guildId)).filter((p) => p.status === 'pending');
   }
 
-  async function page(r: Req, opts: { title: string; nav?: string; body: Html }): Promise<string> {
+  async function page(r: Req, opts: { title: string; nav?: string; body: Html; refreshSec?: number }): Promise<string> {
     const approvals = (await pendingPosts().catch(() => [])).length;
     return layout({ ...opts, session: r.session, counts: { approvals }, path: r.url.pathname + r.url.search });
   }
@@ -294,7 +300,7 @@ export function createDashboard(deps: DashboardDeps) {
       recent.map(async (e) => {
         const info = dir.get(e.by.toLowerCase());
         const discord = info?.link ? await face(info.link.discordId, budget) : null;
-        return html`<li><span class="grow"><span class="title">${e.by}${e.viaDiscord ? html` ${badge('via Discord', 'info')}` : ''}</span><span class="cmd">${e.text}</span></span><span class="muted nowrap">${discord ? discord.name : ''}<br><small>${ago(now() - e.t * 1000)}</small></span></li>`;
+        return html`<li><span class="grow"><span class="title">${info?.robloxId ? html`<a href="/members/${info.robloxId}">${e.by}</a>` : e.by}${e.viaDiscord ? html` ${badge('via Discord', 'info')}` : ''}</span><span class="cmd">${e.text}</span></span><span class="muted nowrap">${discord ? discord.name : ''}<br><small>${ago(now() - e.t * 1000)}</small></span></li>`;
       }),
     );
     const stat = (href: string | null, _ic: string, tone: string, n: string | number, label: string, extra = '') =>
@@ -509,7 +515,7 @@ export function createDashboard(deps: DashboardDeps) {
         const roblox =
           e.by === 'server'
             ? html`<span class="muted">Game (automatic)</span>`
-            : html`<span class="who"><span class="stack-sm">${info?.robloxId ? html`<a href="${profileUrl(info.robloxId)}" target="_blank" rel="noreferrer noopener">${e.by}</a>` : html`<span>${e.by}</span>`}</span><a class="icon-btn" href="/game-log${filterQuery({ ...f, who: e.by, page: 1 })}" title="Only ${e.by}'s commands" aria-label="Only ${e.by}'s commands">${icon('search', 'ic sm')}</a></span>`;
+            : html`<span class="who"><span class="stack-sm">${info?.robloxId ? html`<a href="/members/${info.robloxId}">${e.by}</a>` : html`<span>${e.by}</span>`}</span><a class="icon-btn" href="/game-log${filterQuery({ ...f, who: e.by, page: 1 })}" title="Only ${e.by}'s commands" aria-label="Only ${e.by}'s commands">${icon('search', 'ic sm')}</a></span>`;
         const discord = info?.link ? faceHtml(await face(info.link.discordId, budget), html`<code>${info.link.discordId}</code>`) : e.by === 'server' ? '' : badge('Not linked', 'muted');
         return html`<tr>
           <td class="nowrap" title="${utc(e.t * 1000)}">${ago(now() - e.t * 1000)}<br><small class="muted">${utc(e.t * 1000).slice(5)}</small></td>
@@ -725,7 +731,7 @@ export function createDashboard(deps: DashboardDeps) {
     const body = await Promise.all(
       shown.map(
         async (l) => html`<tr><td>${faceHtml(await face(l.discordId, budget), html`<code>${l.discordId}</code>`)}</td>
-        <td><a href="${profileUrl(l.robloxId)}" rel="noreferrer noopener" target="_blank">${l.robloxName}</a><br><small class="muted">${l.robloxId}</small></td>
+        <td><a href="/members/${l.robloxId}">${l.robloxName}</a><br><small class="muted">${l.robloxId}</small></td>
         <td>${badge(l.method === 'game' ? 'In game' : l.method === 'manual' ? 'By hand' : l.method === 'blurb' ? 'Profile phrase' : l.method, l.method === 'manual' ? 'warn' : 'muted')}</td>
         <td class="nowrap">${new Date(l.linkedAt * 1000).toISOString().slice(0, 10)}</td>
         <td><form method="post" class="inline">${csrfField(r.session)}<input type="hidden" name="discordId" value="${l.discordId}"><button class="secondary sm" name="action" value="update">Update roles</button><button class="danger sm" name="action" value="unlink">Unlink</button></form></td></tr>`,
@@ -754,6 +760,373 @@ export function createDashboard(deps: DashboardDeps) {
           <button>Link accounts</button></form>`,
       )}`,
     });
+  }
+
+  // ---------- promotions ----------
+
+  const PROMO_TABS = [
+    ['queue', 'Ready for promotion'],
+    ['progress', 'Progress by rank'],
+    ['history', 'History'],
+  ] as const;
+  type PromoTab = (typeof PROMO_TABS)[number][0];
+  const LADDER = Object.keys(RANKS).map(Number).sort((a, b) => a - b);
+  const memberLink = (id: number, name: string) => html`<a class="strong" href="/members/${id}">${name}</a>`;
+
+  /** Avatar + name (linked to their member page) for a list of Roblox users. */
+  async function people(ids: number[]): Promise<(id: number, sub?: string | Html) => Html> {
+    const [names, heads] = await Promise.all([services.users.namesFor(ids), services.users.headshots(ids)]);
+    return (id, sub) => {
+      const name = names.get(id)?.name ?? `User ${id}`;
+      const img = heads.get(id);
+      return html`<span class="who">${img ? html`<img src="${img}" alt="" width="28" height="28">` : html`<span class="avatar-ph">${initials(name)}</span>`}<span class="stack-sm">${memberLink(id, name)}${sub ? html`<small>${sub}</small>` : ''}</span></span>`;
+    };
+  }
+
+  const bar = (have: number, need: number) =>
+    html`<span class="bar"><progress max="${Math.max(need, 1)}" value="${Math.min(have, Math.max(need, 1))}"></progress><small>${have.toLocaleString('en-GB')} / ${need.toLocaleString('en-GB')}</small></span>`;
+
+  /** A scan to show: fresh if it finishes quickly, else the last one (and a scan keeps going). */
+  async function rosterNow(onlyRank: number | null): Promise<{ roster: Roster | null; updating: boolean; error?: string }> {
+    const scanner = rosterFor(services);
+    const run = scanner.load(onlyRank).catch(() => null);
+    const waited = await Promise.race([run, new Promise<null>((res) => setTimeout(() => res(null), deps.scanWaitMs ?? 6000).unref())]);
+    const roster = waited ?? scanner.cached(onlyRank);
+    const key = onlyRank === null ? 'all' : String(onlyRank);
+    return { roster, updating: scanner.isRunning(onlyRank), error: scanner.errors.get(key) };
+  }
+
+  function scanStatus(onlyRank: number | null, s: { roster: Roster | null; updating: boolean; error?: string }): Html {
+    const key = onlyRank === null ? 'all' : String(onlyRank);
+    const p = rosterFor(services).progress.get(key);
+    if (s.error && !s.updating) return badge(`Couldn't read the group: ${s.error.slice(0, 80)}`, 'bad');
+    if (s.updating) return html`<span class="muted">Checking the group${p?.total ? ` · ${p.done} of ${p.total} records read` : ''}…</span>`;
+    if (!s.roster) return html`<span class="muted">Not checked yet</span>`;
+    return html`<span class="muted">Checked ${ago(now() - s.roster.at)} · ${s.roster.checked} members${s.roster.capped ? ' (stopped at ELIGIBLE_MAX_PROFILES)' : ''}</span>`;
+  }
+
+  async function promotionsPage(r: Req): Promise<string> {
+    const tabParam = r.url.searchParams.get('tab');
+    const tab: PromoTab = PROMO_TABS.some(([k]) => k === tabParam) ? (tabParam as PromoTab) : 'queue';
+    const group = services.config.roblox.armyGroupId;
+    const roles = await services.groups.listRoles(group).catch(() => [] as GroupRole[]);
+    const roleAt = (rank: number) => roles.find((x) => x.rank === rank);
+    let content: Html;
+    let scanFor: number | null = null;
+    let status: Html = html``;
+    let refresh = false;
+
+    if (tab === 'history') {
+      const list = (await services.promotionLog.list()).slice(0, 200);
+      const who = await people(list.map((e) => e.userId));
+      content = card(
+        null,
+        list.length
+          ? html`<div class="table-wrap"><table><thead><tr><th>When</th><th>Member</th><th>Change</th><th>By</th><th>Reason</th></tr></thead><tbody>
+            ${list.map(
+              (e) => html`<tr><td class="nowrap" title="${utc(e.t)}">${ago(now() - e.t)}</td><td>${who(e.userId)}</td>
+              <td class="nowrap">${e.from} → <b>${e.to}</b> ${e.toRank > e.fromRank ? badge('Promotion', 'ok') : badge('Rank change', 'warn')}</td>
+              <td>${e.by}</td><td class="wrap">${e.reason ?? ''}</td></tr>`,
+            )}</tbody></table></div>`
+          : empty('No rank changes yet', 'Promotions made with /promote or on this dashboard are listed here.'),
+        { flush: list.length > 0 },
+      );
+    } else if (tab === 'progress') {
+      const want = Number(r.url.searchParams.get('rank'));
+      const rank = LADDER.includes(want) ? want : LADDER[0]!;
+      scanFor = rank;
+      const s = await rosterNow(rank);
+      status = scanStatus(rank, s);
+      refresh = s.updating && !s.roster;
+      const chips = html`<nav class="chips" aria-label="Rank">${LADDER.map((k) => html`<a href="/promotions?tab=progress&rank=${k}"${k === rank ? new Html(' aria-current="page"') : ''}>${roleAt(k)?.name ?? `Rank ${k}`}</a>`)}</nav>`;
+      const req = RANKS[rank]!;
+      const rows = (s.roster?.entries ?? []).slice().sort((a, b) => progressOf(b) - progressOf(a) || b.points - a.points);
+      const pageNo = Math.max(1, Math.min(Math.ceil(rows.length / PAGE_SIZE) || 1, Number(r.url.searchParams.get('page')) || 1));
+      const shown = rows.slice((pageNo - 1) * PAGE_SIZE, pageNo * PAGE_SIZE);
+      const who = await people(shown.map((e) => e.userId));
+      const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+      content = html`${chips}
+      ${card(
+        null,
+        html`<div class="card-head pad"><h2>${roleAt(rank)?.name ?? `Rank ${rank}`} → ${req.next}</h2><span class="muted">Needs ${req.points} points and ${req.trainings} trainings</span></div>
+        ${
+          shown.length
+            ? html`<div class="table-wrap"><table><thead><tr><th>Member</th><th>Points</th><th>Trainings</th><th>Status</th><th></th></tr></thead><tbody>
+              ${shown.map(
+                (e) => html`<tr><td>${who(e.userId)}</td><td>${bar(e.points, req.points)}</td><td>${bar(e.trainings, req.trainings)}</td>
+                <td class="nowrap">${!e.hasProfile ? badge('No record', 'muted') : e.eligible ? badge('Ready', 'ok') : html`<span class="muted">${Math.round(progressOf(e) * 100)}%</span>`}</td>
+                <td class="nowrap right"><a class="btn sm secondary" href="/members/${e.userId}">Open</a></td></tr>`,
+              )}</tbody></table></div>
+              ${pages > 1 ? html`<div class="pager"><span class="muted">${rows.length} members · page ${pageNo} of ${pages}</span><span class="btn-row">${pageNo > 1 ? html`<a class="btn sm secondary" href="/promotions?tab=progress&rank=${rank}&page=${pageNo - 1}">Previous</a>` : ''}${pageNo < pages ? html`<a class="btn sm secondary" href="/promotions?tab=progress&rank=${rank}&page=${pageNo + 1}">Next</a>` : ''}</span></div>` : ''}`
+            : s.roster
+              ? empty('Nobody at this rank', 'Nobody in the army group holds this rank right now.')
+              : empty('Checking the group…', 'This page refreshes by itself.')
+        }`,
+        { flush: true },
+      )}`;
+    } else {
+      const s = await rosterNow(null);
+      status = scanStatus(null, s);
+      refresh = s.updating && !s.roster;
+      const ready = (s.roster?.entries ?? []).filter((e) => e.eligible && e.next).sort((a, b) => a.rank - b.rank || b.points - a.points);
+      const who = await people(ready.map((e) => e.userId));
+      const links = await services.links.all();
+      const linkOf = new Map(links.map((l) => [l.robloxId, l]));
+      const budget = { n: 10 };
+      const rows = await Promise.all(
+        ready.map(async (e) => {
+          const to = nextRole(roles, e.rank);
+          const l = linkOf.get(e.userId);
+          return html`<tr><td>${who(e.userId)}</td>
+            <td class="nowrap">${e.roleName} → <b>${to?.name ?? e.next!.next}</b></td>
+            <td class="nowrap">${e.points} <small class="muted">/ ${e.next!.points}</small></td>
+            <td class="nowrap">${e.trainings} <small class="muted">/ ${e.next!.trainings}</small></td>
+            <td>${l ? faceHtml(await face(l.discordId, budget)) : badge('Not linked', 'muted')}</td>
+            <td class="nowrap right">${to ? html`<a class="btn sm secondary" href="/members/${e.userId}?promote=${to.id}">Review & promote</a>` : ''}</td></tr>`;
+        }),
+      );
+      content = card(
+        null,
+        ready.length
+          ? html`<div class="table-wrap"><table><thead><tr><th>Member</th><th>Promotion</th><th>Points</th><th>Trainings</th><th>Discord</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
+          : s.roster
+            ? empty('Nobody is ready right now', 'Members show up here once they have the points and trainings for their next rank.')
+            : empty('Checking the group…', 'Reading everyone’s service record. This page refreshes by itself.'),
+        { flush: ready.length > 0 },
+      );
+    }
+
+    return page(r, {
+      title: 'Promotions',
+      nav: 'promotions',
+      refreshSec: refresh ? 5 : undefined,
+      body: html`${pageHead(
+        'Promotions',
+        html`Points-ladder ranks in the army group. Officer ranks are by selection: change those from a member’s page. ${tab === 'history' ? '' : status}`,
+        html`<form method="get" action="/members" class="search-inline"><input name="q" placeholder="Roblox name or ID" aria-label="Find a member" required><button class="secondary">Find</button></form>
+        ${tab === 'history' ? '' : html`<form method="post" action="/promotions">${csrfField(r.session)}<input type="hidden" name="action" value="refresh"><input type="hidden" name="back" value="${r.url.pathname + r.url.search}"><input type="hidden" name="rank" value="${scanFor ?? ''}"><button class="secondary">Check again</button></form>`}`,
+      )}
+      <nav class="tabs" aria-label="Promotions">${PROMO_TABS.map(([k, label]) => html`<a href="/promotions?tab=${k}"${k === tab ? new Html(' aria-current="page"') : ''}>${label}</a>`)}</nav>
+      ${content}`,
+    });
+  }
+
+  async function promotionsAction(r: Req): Promise<Redirect> {
+    if (r.form.action !== 'refresh') throw new UserFacingError('Unknown action.');
+    const rank = Number(r.form.rank);
+    rosterFor(services)
+      .load(LADDER.includes(rank) ? rank : null, { force: true })
+      .catch((err) => services.logger.warn({ err }, 'roster scan failed'));
+    flash(r.session, 'ok', 'Checking the group again. It takes a moment for a big group.');
+    const back = r.form.back ?? '/promotions';
+    return new Redirect(back.startsWith('/promotions') ? back : '/promotions');
+  }
+
+  // ---------- members ----------
+
+  async function membersPage(r: Req): Promise<string | Redirect> {
+    const q = (r.url.searchParams.get('q') ?? '').trim().slice(0, 100);
+    let notFound = false;
+    if (q) {
+      const u = await services.users.resolve(q).catch(() => null);
+      if (u) return new Redirect(`/members/${u.id}`);
+      notFound = true;
+    }
+    const recent = (await services.promotionLog.list()).slice(0, 8);
+    const who = await people(recent.map((e) => e.userId));
+    return page(r, {
+      title: 'Members',
+      nav: 'members',
+      body: html`${pageHead('Members', 'Look up anyone by their Roblox name or ID to see their rank, progress, medals and record.')}
+      ${card(
+        null,
+        html`<form method="get" action="/members" class="row"><div class="field grow"><label for="q">Roblox name, ID or profile link</label><span class="input-ic">${icon('search')}<input id="q" name="q" value="${q}" required autofocus></span></div><button>Find</button></form>
+        ${notFound ? html`<p class="flash bad">No Roblox user called “${q}”.</p>` : ''}`,
+      )}
+      ${card(
+        'Recently promoted',
+        recent.length
+          ? html`<ul class="list">${recent.map((e) => html`<li><span class="grow">${who(e.userId, `${e.from} → ${e.to}`)}</span><span class="muted nowrap">${ago(now() - e.t)}</span></li>`)}</ul>`
+          : empty('Nothing yet', 'Rank changes made through the bot show here.'),
+        { action: html`<a href="/promotions?tab=history">History</a>` },
+      )}`,
+    });
+  }
+
+  const PUNISH = new Set(['kick', 'ban', 'unban', 'warn', 'jail', 'unjail', 'mute', 'unmute', 'release', 'arrest', 'pban', 'tban']);
+
+  async function memberPage(r: Req, id: number): Promise<string> {
+    const user = await services.users.getById(id);
+    if (!user) throw new UserFacingError('There is no Roblox user with that ID.');
+    const group = services.config.roblox.armyGroupId;
+    const [rank, roles, profile, ban, link, heads, history, log, staff] = await Promise.all([
+      services.groups.rankIn(group, id).catch(() => null),
+      services.groups.listRoles(group).catch(() => [] as GroupRole[]),
+      services.profiles.get(id).catch(() => null),
+      services.global.ban(id).catch(() => null),
+      services.links.findByRoblox(id),
+      services.users.headshots([id]),
+      services.promotionLog.list(id),
+      services.adminLog.list(),
+      services.global.staff().catch(() => ({}) as Record<string, { tier?: number }>),
+    ]);
+    const d = profile?.data;
+    const nowSec = now() / 1000;
+    const st = d && rank ? standing(d, rank.rank) : null;
+    const to = rank ? nextRole(roles, rank.rank) : undefined;
+    const want = Number(r.url.searchParams.get('promote'));
+    const proposed = assignable(roles).find((x) => x.id === want);
+    const staffTier = staff[String(id)]?.tier;
+    const banned = ban && (ban.untilT === 0 || ban.untilT > nowSec);
+    const lower = user.name.toLowerCase();
+    const nameRe = new RegExp(`(^|[^A-Za-z0-9_])${user.name.replace(/[^A-Za-z0-9_]/g, '')}([^A-Za-z0-9_]|$)`, 'i');
+    const mentions = log.filter((e) => e.by.toLowerCase() !== lower && nameRe.test(e.text)).slice(0, 40);
+    const ran = log.filter((e) => e.by.toLowerCase() === lower).length;
+    const discord = link ? await face(link.discordId) : null;
+    const date = (sec?: number) => (sec ? new Date(sec * 1000).toISOString().slice(0, 10) : '–');
+
+    // header
+    const head = html`<header class="page-head member-head">
+      <div class="server-top">${heads.get(id) ? html`<img class="member-img" src="${heads.get(id)}" alt="" width="72" height="72">` : html`<span class="server-ph">${initials(user.name)}</span>`}
+        <div><h1>${user.name}</h1><p class="sub">${user.displayName !== user.name ? html`${user.displayName} · ` : ''}${rank?.rank ? html`<b>${rank.roleName}</b> (rank ${rank.rank})` : 'Not in the army group'}
+        ${staffTier ? html` · ${badge(`Staff ${staffTier} · ${TIER_NAMES[staffTier as StaffTier] ?? ''}`, 'info')}` : ''}${banned ? html` · ${badge(ban!.untilT === 0 ? 'Banned for good' : 'Banned', 'bad')}` : ''}${d && d.mp.jailLeft > 0 ? html` · ${badge('In jail', 'warn')}` : ''}</p>
+        <p class="sub"><a href="${profileUrl(id)}" target="_blank" rel="noreferrer noopener">Roblox profile</a> · ID <code>${id}</code>${discord ? html` · Discord: <b>${discord.name}</b>` : ' · Discord: not linked'}${ran ? html` · <a href="/game-log?who=${encodeURIComponent(user.name)}">${ran} staff commands run</a>` : ''}</p></div>
+      </div></header>`;
+
+    // promotion
+    const options = assignable(roles).map((x) => ({ value: String(x.id), label: `${x.rank} · ${x.name}` }));
+    const pick = proposed ?? to;
+    const promoForm = rank?.rank
+      ? html`<form method="post" action="/members/${id}" class="row">${csrfField(r.session)}<input type="hidden" name="action" value="rank"><input type="hidden" name="expectRoleId" value="${rank.roleId}">
+          ${field('New rank', 'roleId', select('roleId', options, pick ? String(pick.id) : undefined, { none: null }))}
+          ${field('Reason (for the audit log)', 'reason', html`<input id="reason" name="reason" maxlength="200" placeholder="Optional">`)}
+          <button>${proposed ? `Promote to ${proposed.name}` : 'Change rank'}</button></form>`
+      : html`<p class="muted">They need to join the army group before they can be given a rank.</p>`;
+    const promo = card(
+      'Promotion',
+      html`${
+        proposed && rank?.rank
+          ? html`<div class="flash ok confirm">Promote <b>${user.name}</b> from <b>${rank.roleName}</b> to <b>${proposed.name}</b>? Check their record below, then confirm.</div>`
+          : ''
+      }
+      ${
+        st?.next
+          ? html`<div class="progress-grid">
+              <div><span class="label">Next on the ladder</span><b>${st.next.next}</b> ${st.eligible ? badge('Ready', 'ok') : badge(`${Math.round(progressOf({ points: st.points, trainings: st.next.haveTrainings, next: st.next }) * 100)}%`, 'muted')}</div>
+              <div><span class="label">Points</span>${bar(st.points, st.next.points)}</div>
+              <div><span class="label">Trainings</span>${bar(st.next.haveTrainings, st.next.trainings)}</div>
+            </div>`
+          : html`<p class="muted">${rank?.rank ? 'Past the points ladder: officer ranks are by selection.' : ''}${!d ? ' No service record yet.' : ''}</p>`
+      }
+      ${promoForm}
+      ${history.length ? html`<h3 class="sub-h">Rank changes through the bot</h3><ul class="list compact">${history.slice(0, 10).map((e) => html`<li><span class="grow">${e.from} → <b>${e.to}</b>${e.reason ? html` <small class="muted">· ${e.reason}</small>` : ''}</span><span class="muted nowrap">${e.by} · ${date(e.t / 1000)}</span></li>`)}</ul>` : ''}`,
+    );
+
+    if (!d) {
+      return page(r, { title: user.name, nav: 'members', body: html`${head}${promo}${card('Service record', empty('No service record', 'They have never played Hong Kong 1941, or their record could not be read.'))}` });
+    }
+
+    const pts = computePoints(d);
+    const s = d.service;
+    const medals = Object.entries(d.medals.a).map(([mid, a]) => ({ m: MEDAL_BY_ID.get(mid), mid, a })).sort((x, y) => (x.m ? 0 : 1) - (y.m ? 0 : 1));
+    const quals = Object.entries(d.medals.q).map(([cid, q]) => ({ c: CERT_BY_ID.get(cid), cid, q }));
+    const arrests = d.mp.arrests.slice(0, 15);
+
+    const stats = html`<div class="stats">
+      <div class="stat"><span class="stat-n">${pts.total}</span><span class="stat-l">points</span></div>
+      <div class="stat"><span class="stat-n">${d.training.attended}</span><span class="stat-l">trainings</span></div>
+      <div class="stat"><span class="stat-n">${hours(s.deployedTime)}</span><span class="stat-l">in the field</span></div>
+      <div class="stat"><span class="stat-n">${hours(s.playtime)}</span><span class="stat-l">played</span></div>
+      <div class="stat"><span class="stat-n">${Object.keys(d.medals.a).length}</span><span class="stat-l">medals</span></div>
+    </div>`;
+
+    const discipline = card(
+      'Discipline',
+      html`<dl class="meta">
+        <dt>Ban</dt><dd>${ban ? html`${banned ? badge(ban.untilT === 0 ? 'Permanent' : `Until ${utc(ban.untilT * 1000)}`, 'bad') : html`<span class="muted">Expired ${utc(ban.untilT * 1000)}</span>`} ${ban.reason ?? ''}${ban.by ? html` <small class="muted">by ${ban.by}</small>` : ''}` : html`<span class="muted">None</span>`}</dd>
+        <dt>Jail</dt><dd>${d.mp.jailLeft > 0 ? html`${badge(`${Math.ceil(d.mp.jailLeft / 60)} min left`, 'warn')} ${d.mp.jailCharges} <small class="muted">by ${d.mp.jailBy}</small>` : html`<span class="muted">Not in jail</span>`}</dd>
+        <dt>Arrests</dt><dd>${d.mp.arrests.length}</dd>
+      </dl>
+      ${
+        arrests.length
+          ? html`<h3 class="sub-h">Arrest record</h3><div class="table-wrap"><table><thead><tr><th>When</th><th>Charges</th><th>Time</th><th>By</th></tr></thead><tbody>
+            ${arrests.map((a) => html`<tr><td class="nowrap">${date(a.t)}</td><td class="wrap">${(a.charges ?? []).join(', ') || '–'}${a.notes ? html`<br><small class="muted">${a.notes}</small>` : ''}</td><td class="nowrap">${a.minutes ? `${a.minutes} min` : ''}</td><td>${a.by ?? ''}</td></tr>`)}
+            </tbody></table></div>`
+          : ''
+      }
+      ${
+        mentions.length
+          ? html`<h3 class="sub-h">Staff commands naming them</h3><ul class="list compact">${mentions.map(
+              (e) => html`<li><span class="grow">${badge(commandOf(e), PUNISH.has(commandOf(e)) ? 'bad' : 'muted')} <span class="cmd">${e.text}</span></span><span class="muted nowrap">${e.by} · ${ago(now() - e.t * 1000)}</span></li>`,
+            )}</ul>`
+          : html`<p class="muted">No staff commands in the game log name them.</p>`
+      }`,
+    );
+
+    const medalsCard = card(
+      'Medals and qualifications',
+      medals.length || quals.length
+        ? html`${medals.length ? html`<ul class="list compact">${medals.map((x) => html`<li><span class="grow"><b>${x.m?.name ?? x.mid}</b>${(x.a.n ?? 1) > 1 ? html` <small class="muted">×${x.a.n}</small>` : ''}${x.a.c ? html`<br><small class="muted">${x.a.c}</small>` : ''}</span><span class="muted nowrap">${x.a.by ?? ''} · ${date(x.a.t)}</span></li>`)}</ul>` : ''}
+          ${quals.length ? html`<p class="tags">${quals.map((x) => badge(x.c?.stripes ? `${Math.max(1, Math.min(MAX_STRIPES, x.q.n ?? 1))} service stripe${(x.q.n ?? 1) === 1 ? '' : 's'}` : (x.c?.name ?? x.cid), 'accent'))}</p>` : ''}`
+        : empty('None yet'),
+    );
+
+    const pointsCard = card(
+      'Points breakdown',
+      html`<table class="kv"><tbody>${pts.parts.filter(([, n]) => n !== 0).map(([label, n]) => html`<tr><td>${label}</td><td class="right">${n}</td></tr>`)}<tr class="total"><td>Total</td><td class="right">${pts.total}</td></tr></tbody></table>`,
+    );
+
+    const serviceCard = card(
+      'Service',
+      html`<dl class="meta">
+        <dt>First joined</dt><dd>${date(s.firstJoin)}</dd><dt>Last seen</dt><dd>${s.lastJoin ? ago(now() - s.lastJoin * 1000) : '–'}</dd>
+        <dt>Joins</dt><dd>${s.joins}</dd><dt>Deployments</dt><dd>${s.deployments}</dd>
+        <dt>Kills</dt><dd>${s.kills} players · ${s.aiKills} AI</dd><dt>Deaths</dt><dd>${s.deaths}</dd>
+        <dt>Captures</dt><dd>${s.captures}</dd><dt>Events</dt><dd>${s.events}</dd>
+        <dt>Trainings</dt><dd>${d.training.attended} attended · ${d.training.passed} passed · ${d.training.failed} failed · ${d.training.hosted} hosted</dd>
+        <dt>Arrests made</dt><dd>${d.mp.made}</dd>
+      </dl>`,
+    );
+
+    const trainings = d.training.history.slice(0, 10);
+    const trainingCard = card(
+      'Recent trainings',
+      trainings.length
+        ? html`<ul class="list compact">${trainings.map((t) => html`<li><span class="grow">${String(t.title ?? 'Training')}${t.result ? html` ${badge(String(t.result), /pass/i.test(String(t.result)) ? 'ok' : /fail/i.test(String(t.result)) ? 'bad' : 'muted')}` : ''}</span><span class="muted nowrap">${t.host ? `${String(t.host)} · ` : ''}${date(t.t)}</span></li>`)}</ul>`
+        : empty('No trainings on record'),
+    );
+
+    const adjust = s.log.slice(0, 10);
+    const adjustCard = adjust.length
+      ? card(
+          'Points awarded by staff',
+          html`<ul class="list compact">${adjust.map((e) => html`<li><span class="grow"><b>${(e.n ?? 0) > 0 ? `+${e.n}` : e.n}</b> ${e.reason ? html`<span class="muted">${e.reason}</span>` : ''}</span><span class="muted nowrap">${e.by ?? ''} · ${date(e.t)}</span></li>`)}</ul>`,
+        )
+      : '';
+
+    return page(r, {
+      title: user.name,
+      nav: 'members',
+      body: html`${head}${stats}
+      <div class="grid-2">
+        <div class="stack">${promo}${discipline}${trainingCard}</div>
+        <div class="stack">${medalsCard}${pointsCard}${serviceCard}${adjustCard}</div>
+      </div>`,
+    });
+  }
+
+  async function memberAction(r: Req, id: number): Promise<void> {
+    if (r.form.action !== 'rank') throw new UserFacingError('Unknown action.');
+    const by = r.session.user!;
+    const { user, from, to } = await changeRank(services, {
+      userId: id,
+      roleId: Number(r.form.roleId),
+      expectRoleId: r.form.expectRoleId ? Number(r.form.expectRoleId) : undefined,
+      actor: { tier: Tier.Owner }, // dashboard admins are the owners
+      audit: { actorId: by.id, actorName: `${by.globalName ?? by.username} (dashboard)` },
+      reason: r.form.reason,
+    });
+    flash(r.session, 'ok', `${user?.name ?? id} is now ${to.name} (was ${from.roleName}). In game it shows after they rejoin.`);
   }
 
   // ---------- panels ----------
@@ -1276,6 +1649,8 @@ export function createDashboard(deps: DashboardDeps) {
           await serverAction(r, guildOr404(m[1]!));
           if (isTab(r.form.tab)) back = `${path}?tab=${r.form.tab}`;
         } else if (path === '/approvals') await approvalsAction(r);
+        else if (path === '/promotions') return await promotionsAction(r);
+        else if (/^\/members\/\d{1,19}$/.test(path)) await memberAction(r, Number(path.split('/')[2]));
         else if (path === '/game-log') await gameLogAction(r);
         else if (path === '/links') {
           await linksAction(r);
@@ -1297,6 +1672,10 @@ export function createDashboard(deps: DashboardDeps) {
     const sm = /^\/servers\/(\d{15,25})$/.exec(path);
     if (sm) return serverPage(r, guildOr404(sm[1]!));
     if (path === '/links') return linksPage(r);
+    if (path === '/promotions') return promotionsPage(r);
+    if (path === '/members') return membersPage(r);
+    const mm = /^\/members\/(\d{1,19})$/.exec(path);
+    if (mm) return memberPage(r, Number(mm[1]));
     if (path === '/panels') return panelsPage(r);
     if (path === '/panels/new') return newPanelPage(r);
     const pm = /^\/panels\/(\d{15,25})$/.exec(path);
@@ -1307,7 +1686,7 @@ export function createDashboard(deps: DashboardDeps) {
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const headers: Record<string, string | string[]> = {
       'content-security-policy':
-        "default-src 'none'; style-src 'self'; img-src 'self' https://cdn.discordapp.com https://media.discordapp.net; form-action 'self' https://discord.com; frame-ancestors 'none'; base-uri 'none'",
+        "default-src 'none'; style-src 'self'; img-src 'self' https://cdn.discordapp.com https://media.discordapp.net https://*.rbxcdn.com; form-action 'self' https://discord.com; frame-ancestors 'none'; base-uri 'none'",
       'x-content-type-options': 'nosniff',
       'referrer-policy': 'same-origin',
       'cache-control': 'no-store',

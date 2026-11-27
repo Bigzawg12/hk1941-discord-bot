@@ -8,9 +8,10 @@ import {
 } from 'discord.js';
 import { COLOURS, ephemeral, esc, resolveRobloxTarget } from '../discord/helpers.js';
 import { standing } from '../game/points.js';
+import { changeRank, rankGuard } from '../game/promotions.js';
 import { Tier } from '../permissions/tiers.js';
 import { profileUrl } from '../roblox/users.js';
-import { defineCommand, type CommandContext, type Services } from '../types.js';
+import { defineCommand, type CommandContext } from '../types.js';
 import { UserFacingError } from '../util/errors.js';
 import type { ButtonInteraction } from 'discord.js';
 
@@ -19,14 +20,6 @@ import type { ButtonInteraction } from 'discord.js';
  * /promote shows current rank -> new rank with their points standing, and asks for confirmation;
  * the Confirm button changes the role. Only the person who asked can confirm.
  */
-
-async function rankGuard(services: Services, callerRobloxId: number | undefined, callerTier: number, currentRank: number, newRank: number) {
-  if (callerTier >= Tier.Owner) return;
-  if (!callerRobloxId) throw new UserFacingError('Link your Roblox account first (/link start): promotions are checked against your own rank.');
-  const mine = await services.groups.rankIn(services.config.roblox.armyGroupId, callerRobloxId, { fresh: true });
-  if (newRank >= mine.rank) throw new UserFacingError(`You can only give ranks below your own (${mine.roleName}, rank ${mine.rank}).`);
-  if (currentRank >= mine.rank) throw new UserFacingError('You can only change the rank of people below you.');
-}
 
 export default defineCommand({
   tier: Tier.Administrator,
@@ -62,7 +55,7 @@ export default defineCommand({
     const current = await services.groups.rankIn(group, user.id, { fresh: true });
     if (current.rank === 0) throw new UserFacingError(`${user.name} isn't in the army group. They need to join it first.`);
     if (current.roleId === role.id) throw new UserFacingError(`${user.name} is already ${role.name}.`);
-    await rankGuard(services, ctx.caller.robloxId, ctx.caller.tier, current.rank, role.rank);
+    await rankGuard(services, { robloxId: ctx.caller.robloxId, tier: ctx.caller.tier }, current.rank, role.rank);
 
     const profile = await services.profiles.get(user.id);
     const st = profile ? standing(profile.data, current.rank) : null;
@@ -98,26 +91,13 @@ export default defineCommand({
       await interaction.update({ content: 'Cancelled.', embeds: [], components: [] });
       return;
     }
-    const userId = Number(userIdS);
-    const roleId = Number(roleIdS);
-    const group = services.config.roblox.armyGroupId;
     await interaction.deferUpdate();
-    const roles = await services.groups.listRoles(group);
-    const role = roles.find((r) => r.id === roleId);
-    if (!role) throw new UserFacingError('That rank no longer exists.');
-    const current = await services.groups.rankIn(group, userId, { fresh: true });
-    await rankGuard(services, ctx.caller.robloxId, ctx.caller.tier, current.rank, role.rank); // check again: things may have changed
-    const user = await services.users.getById(userId);
-    await services.groups.setRole(group, userId, roleId);
-    await services.audit.record({
-      actorId: interaction.user.id,
-      actorName: `${interaction.user.username}${ctx.caller.robloxName ? ` / ${ctx.caller.robloxName}` : ''}`,
-      action: role.rank > current.rank ? 'Promotion' : 'Rank change',
-      target: `${user?.name ?? userId} (${userId})`,
-      detail: `${current.roleName} (${current.rank}) → ${role.name} (${role.rank})`,
-      ok: true,
-      guildId: interaction.guildId,
+    const { user, to } = await changeRank(services, {
+      userId: Number(userIdS),
+      roleId: Number(roleIdS),
+      actor: { robloxId: ctx.caller.robloxId, tier: ctx.caller.tier },
+      audit: { actorId: interaction.user.id, actorName: `${interaction.user.username}${ctx.caller.robloxName ? ` / ${ctx.caller.robloxName}` : ''}`, guildId: interaction.guildId },
     });
-    await interaction.editReply({ content: `✅ ${esc(user?.name ?? String(userId))} is now **${esc(role.name)}**. (In game it shows after they rejoin.)`, embeds: [], components: [] });
+    await interaction.editReply({ content: `✅ ${esc(user?.name ?? userIdS ?? '')} is now **${esc(to.name)}**. (In game it shows after they rejoin.)`, embeds: [], components: [] });
   },
 });

@@ -64,6 +64,7 @@ export function testServices(routes: Route[], envOver: Env = {}): { services: Se
     postStore: new MemoryPostStore(),
     panelStore: new MemoryPanelStore(),
     adminLogFile: null,
+    promotionLogFile: null,
     sleep: async () => undefined,
   });
   return { services, calls };

@@ -77,6 +77,62 @@ export class UsersClient {
     });
   }
 
+  /** Names for many users at once (100 per request). Unknown or failed ones are left out. */
+  async namesFor(ids: number[]): Promise<Map<number, RobloxUser>> {
+    const out = new Map<number, RobloxUser>();
+    const need: number[] = [];
+    for (const id of new Set(ids)) {
+      const hit = this.byId.get(id);
+      if (hit) out.set(id, hit);
+      else if (hit === undefined) need.push(id);
+    }
+    for (let i = 0; i < need.length; i += 100) {
+      const chunk = need.slice(i, i + 100);
+      try {
+        const res = await this.http.post<{ data?: { id?: number; name?: string; displayName?: string }[] }>('https://users.roblox.com/v1/users', {
+          body: { userIds: chunk, excludeBannedUsers: false },
+        });
+        for (const d of res.data?.data ?? []) {
+          if (!d.id) continue;
+          const u: RobloxUser = { id: d.id, name: d.name ?? String(d.id), displayName: d.displayName ?? d.name ?? String(d.id) };
+          this.byId.set(d.id, u);
+          out.set(d.id, u);
+        }
+      } catch {
+        // names are nice to have: fall back to IDs
+      }
+    }
+    return out;
+  }
+
+  /** Headshots for many users at once (100 per request). */
+  async headshots(ids: number[]): Promise<Map<number, string>> {
+    const out = new Map<number, string>();
+    const need: number[] = [];
+    for (const id of new Set(ids)) {
+      const hit = this.thumbs.get(id);
+      if (hit) out.set(id, hit);
+      else if (hit === undefined) need.push(id);
+    }
+    for (let i = 0; i < need.length; i += 100) {
+      const chunk = need.slice(i, i + 100);
+      try {
+        const res = await this.http.get<Thumbs>('https://thumbnails.roblox.com/v1/users/avatar-headshot', {
+          query: { userIds: chunk.join(','), size: '150x150', format: 'Png', isCircular: 'false' },
+        });
+        for (const t of res.data?.data ?? []) {
+          if (!t.targetId) continue;
+          const url = t.state === 'Completed' && t.imageUrl ? t.imageUrl : null;
+          this.thumbs.set(t.targetId, url);
+          if (url) out.set(t.targetId, url);
+        }
+      } catch {
+        // pictures are optional
+      }
+    }
+    return out;
+  }
+
   /** Avatar headshot URL, or null if Roblox hasn't rendered one. */
   async headshotUrl(id: number): Promise<string | null> {
     return this.thumbs.getOrLoad(id, async () => {

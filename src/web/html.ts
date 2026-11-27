@@ -115,7 +115,7 @@ export interface NavCounts {
   approvals?: number;
 }
 
-export function layout(opts: { title: string; session: Session; body: Html; nav?: string; counts?: NavCounts; bare?: boolean; path?: string }): string {
+export function layout(opts: { title: string; session: Session; body: Html; nav?: string; counts?: NavCounts; bare?: boolean; path?: string; refreshSec?: number }): string {
   const { session: s } = opts;
   const flash = s.flash;
   s.flash = undefined;
@@ -128,7 +128,8 @@ export function layout(opts: { title: string; session: Session; body: Html; nav?
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<meta name="robots" content="noindex">
+<meta name="robots" content="noindex">${opts.refreshSec ? html`
+<meta http-equiv="refresh" content="${opts.refreshSec}">` : ''}
 <meta name="color-scheme" content="${light ? 'light' : 'dark'}">
 <title>${opts.title} · Hong Kong 1941 staff</title>
 <link rel="icon" href="/static/logo.png" type="image/png">
@@ -142,6 +143,8 @@ ${
   <nav class="nav" aria-label="Main">
     ${item('/', 'Overview', 'home')}
     ${item('/approvals', 'Approvals', 'approvals', opts.counts?.approvals)}
+    ${item('/promotions', 'Promotions', 'promotions')}
+    ${item('/members', 'Members', 'members')}
     ${item('/panels', 'Panels', 'panels')}
     ${item('/game-log', 'Game log', 'gamelog')}
     ${item('/servers', 'Servers', 'servers')}
@@ -371,6 +374,30 @@ input[type=checkbox]{width:16px;height:16px;min-height:0;accent-color:var(--acce
 .pager{display:flex;justify-content:space-between;align-items:center;gap:10px;padding:10px 20px;border-top:1px solid var(--line);font-size:.86rem}
 
 /* panels */
+/* promotions and members */
+.chips{display:flex;flex-wrap:wrap;gap:6px;margin-bottom:14px}
+.chips a{padding:4px 11px;border:1px solid var(--line-2);border-radius:3px;color:var(--ink-2);text-decoration:none;font-size:.85rem;font-weight:500}
+.chips a:hover{border-color:var(--muted);color:var(--ink)}
+.chips a[aria-current]{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.card-head.pad{padding:14px 20px 12px;margin:0;border-bottom:1px solid var(--line)}
+.bar{display:flex;align-items:center;gap:8px;min-width:150px}
+.bar small{color:var(--muted);font-variant-numeric:tabular-nums;white-space:nowrap}
+progress{appearance:none;-webkit-appearance:none;width:110px;height:6px;border:0;border-radius:3px;background:var(--line-2);overflow:hidden;flex:none}
+progress::-webkit-progress-bar{background:var(--line-2);border-radius:3px}
+progress::-webkit-progress-value{background:var(--gold);border-radius:3px}
+progress::-moz-progress-bar{background:var(--gold);border-radius:3px}
+.search-inline{display:flex;gap:6px}
+.search-inline input{width:200px}
+.member-img{border-radius:4px;border:1px solid var(--line);background:var(--panel-2)}
+.member-head .sub{margin-top:4px}
+.progress-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:14px;margin-bottom:16px}
+.label{display:block;font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);margin-bottom:4px}
+.sub-h{font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);margin:18px 0 6px}
+.list.compact li{padding:7px 0;font-size:.9rem}
+.tags{display:flex;flex-wrap:wrap;gap:6px;margin:12px 0 0}
+table.kv td{padding:6px 0;border-bottom:1px solid var(--line)}
+table.kv tr.total td{font-weight:700;border-bottom:0;padding-top:9px}
+.flash.confirm{margin-bottom:14px}
 .panel-grid{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
 @media (max-width:1100px){.panel-grid{grid-template-columns:minmax(0,1fr)}}
 .panel-grid>.card{position:sticky;top:20px;align-self:start}

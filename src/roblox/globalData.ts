@@ -114,7 +114,7 @@ export class GlobalData {
 
   async ban(userId: number): Promise<BanRecord | null> {
     const v = await this.get<BanRecord>('HK1941_Bans', `u${userId}`);
-    return v && typeof v === 'object' ? v : null;
+    return v && typeof v === 'object' && typeof v.untilT === 'number' && Number.isFinite(v.untilT) ? v : null;
   }
 
   async adminLog(): Promise<AdminLogEntry[]> {

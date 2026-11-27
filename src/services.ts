@@ -20,6 +20,7 @@ import { ProfileReader } from './roblox/profiles.js';
 import { ServerDirectory } from './roblox/servers.js';
 import { UsersClient } from './roblox/users.js';
 import { AdminLogArchive } from './game/adminLogArchive.js';
+import { PromotionLog } from './game/promotions.js';
 import { EventSync } from './sync/eventSync.js';
 import type { Services } from './types.js';
 
@@ -31,6 +32,8 @@ export interface ServiceOverrides {
   panelStore?: PanelStore;
   /** where the copy of the in-game admin log is kept; null = memory only (tests) */
   adminLogFile?: string | null;
+  /** where rank changes made through the bot are kept; null = memory only (tests) */
+  promotionLogFile?: string | null;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -80,6 +83,7 @@ export function createServices(config: BotConfig, logger: Logger, overrides: Ser
       overrides.adminLogFile === undefined ? join(config.dataDir, 'admin-log.json') : overrides.adminLogFile,
       overrides.now,
     ),
+    promotionLog: new PromotionLog(overrides.promotionLogFile === undefined ? join(config.dataDir, 'promotions.json') : overrides.promotionLogFile),
     bridge: new BridgeClient({
       publisher: new MessagingPublisher(openCloud, config.roblox.universeId),
       acks: sortedMaps,
