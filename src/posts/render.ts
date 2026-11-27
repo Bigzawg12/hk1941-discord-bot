@@ -15,11 +15,13 @@ import { UserFacingError } from '../util/errors.js';
 
 /**
  * How the bot's posts look. Signed posts and SSUs use Discord's newer message layout ("components
- * v2"): a coloured container with text blocks, divider lines, link buttons and a picture. Info
+ * v2"): a coloured container with text blocks, divider lines, link buttons and a picture.
+ * Announcements use the same parts without the box, so they read like a normal message. Info
  * panels are classic embeds with a server-name footer and link buttons under them.
  */
 
 export const POST_KINDS = {
+  announcement: { label: 'Announcement', colour: 0x6b6f73 },
   recruitment: { label: 'Recruitment', colour: 0x3b7d3b },
   shout: { label: 'Shout', colour: 0x3a5f8a },
   notice: { label: 'Notice', colour: 0x8a7a4a },
@@ -220,6 +222,34 @@ export function renderPost(d: PostDraft, meta: RenderMeta): ContainerBuilder {
   return c;
 }
 
+// ---------- plain announcement ----------
+
+/**
+ * An announcement: the ping, a heading, the text, link buttons, signature and picture, with a small
+ * "Sent by" line under it. No box, kind header or "Approved by". It is built in a container so the
+ * approval queue can show it boxed; `liveComponents` takes it out of the box for the real post.
+ */
+export function renderAnnouncement(d: PostDraft, meta: RenderMeta): ContainerBuilder {
+  const texts: string[] = [];
+  const c = new ContainerBuilder();
+  const text = (s: string) => {
+    texts.push(s);
+    c.addTextDisplayComponents(new TextDisplayBuilder().setContent(s));
+  };
+  const ping = pingText(d.ping);
+  if (ping) text(ping);
+  if (d.title.trim()) text(`## ${d.title}${d.subtitle ? `\n*${d.subtitle}*` : ''}`);
+  text(d.body);
+  if (d.buttons.length) c.addActionRowComponents(linkRow(d.buttons));
+  if (d.signature?.trim()) text(formatSignature(d.signature));
+  if (d.imageName) c.addMediaGalleryComponents(new MediaGalleryBuilder().addItems(new MediaGalleryItemBuilder().setURL(`attachment://${d.imageName}`)));
+  text(`-# Sent by <@${meta.authorId}>${meta.approvedBy ? '' : ' · waiting for approval'}`);
+  checkBudget(texts);
+  return c;
+}
+
+const isPlain = (d: Draft): boolean => d.type === 'post' && d.kind === 'announcement';
+
 // ---------- server start up ----------
 
 export function renderSsu(d: SsuDraft, meta: RenderMeta): ContainerBuilder {
@@ -262,12 +292,24 @@ export function renderSsu(d: SsuDraft, meta: RenderMeta): ContainerBuilder {
 }
 
 export function renderDraft(d: Draft, meta: RenderMeta): ContainerBuilder {
-  return d.type === 'post' ? renderPost(d, meta) : renderSsu(d, meta);
+  if (d.type === 'ssu') return renderSsu(d, meta);
+  return isPlain(d) ? renderAnnouncement(d, meta) : renderPost(d, meta);
+}
+
+/** What a post is built from: text, link buttons, a picture, or the box round them. */
+export type LivePart = ContainerBuilder | TextDisplayBuilder | ActionRowBuilder<ButtonBuilder> | MediaGalleryBuilder;
+
+/** The components of the real post: the container, or for an announcement what's inside it. */
+export function liveComponents(d: Draft, meta: RenderMeta): LivePart[] {
+  const c = renderDraft(d, meta);
+  return isPlain(d) ? ([...c.components] as LivePart[]) : [c];
 }
 
 /** Short name for logs and the approval queue. */
 export function draftLabel(d: Draft): string {
-  return d.type === 'post' ? `${POST_KINDS[d.kind].label} post "${d.title.slice(0, 80)}"` : 'Server Start Up';
+  if (d.type === 'ssu') return 'Server Start Up';
+  if (isPlain(d)) return `Announcement "${(d.title.trim() || d.body).replace(/\s+/g, ' ').trim().slice(0, 80)}"`;
+  return `${POST_KINDS[d.kind].label} post "${d.title.slice(0, 80)}"`;
 }
 
 function checkBudget(texts: string[], extra = 0): void {

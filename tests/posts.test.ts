@@ -5,9 +5,12 @@ import { handleInteraction } from '../src/discord/dispatch.js';
 import { loadCommands } from '../src/loaders/commands.js';
 import {
   allowedMentionsFor,
+  draftLabel,
   expandText,
+  liveComponents,
   neutralise,
   parseButtons,
+  renderAnnouncement,
   renderPanel,
   renderPost,
   renderSsu,
@@ -92,6 +95,30 @@ describe('post layout', () => {
     expect(json).toContain('https://example.com/apply');
     expect(json).toContain('**Maj_Test**\\n**Officer Commanding**\\n**C Company**');
     expect(json).toContain('**Approved by:** Col_Approver');
+  });
+
+  it('announcement: ping, heading, text, buttons, signature and a small Sent by line, with no kind header or approver', () => {
+    const d = draft({ kind: 'announcement', title: 'Server update', subtitle: undefined, ping: { kind: 'everyone' } });
+    const json = JSON.stringify(renderAnnouncement(d, { authorId: '42', approvedBy: 'Col_Approver' }).toJSON());
+    expect(json).toContain('"content":"@everyone"');
+    expect(json).toContain('## Server update');
+    expect(json).toContain('We are recruiting **riflemen**.');
+    expect(json).toContain('https://example.com/apply');
+    expect(json).toContain('**Maj_Test**');
+    expect(json).toContain('-# Sent by <@42>');
+    expect(json).not.toContain('accent_color');
+    expect(json).not.toContain('Approved by');
+    expect(json).not.toContain('Col_Approver');
+    expect(JSON.stringify(renderAnnouncement(draft({ kind: 'announcement', title: '' }), { authorId: '42' }).toJSON())).toContain('waiting for approval');
+    expect(draftLabel(draft({ kind: 'announcement', title: '', body: 'Servers\nare up' }))).toBe('Announcement "Servers are up"');
+  });
+
+  it('a live announcement is loose parts; signed posts stay in their box', () => {
+    const plain = liveComponents(draft({ kind: 'announcement' }), { authorId: '1', approvedBy: 'X' }).map((c) => c.toJSON() as { type: number });
+    expect(plain.map((c) => c.type)).not.toContain(17); // 17 = container
+    expect(plain[0]!.type).toBe(10); // 10 = text
+    const boxed = liveComponents(draft(), { authorId: '1', approvedBy: 'X' }).map((c) => c.toJSON() as { type: number });
+    expect(boxed.map((c) => c.type)).toEqual([17]);
   });
 
   it('says it is waiting until approved', () => {
@@ -267,6 +294,55 @@ describe('/post', () => {
     expect(fc.sent[0]!.channelId).toBe(POSTS);
     expect(shown(fc.sent[0]!.payload)).toContain('**Approved by:** tester');
     expect(replyText(form.replies.at(-1))).toMatch(/✅ Posted in <#600000000000000002>/);
+  });
+
+  it('announcement: a shorter form, and a Senior Moderator’s goes out as a plain message with the ping', async () => {
+    const services = await setup();
+    const fc = fakeClient();
+    const cmd = fakeInteraction({ commandName: 'post', strings: { kind: 'announcement', ping: 'everyone' }, roles: [IDS.seniorRole], client: fc });
+    await run(services, cmd.interaction);
+    const m = (cmd.replies.at(-1) as { toJSON(): { custom_id: string; title: string; components: unknown[] } }).toJSON();
+    expect(m.title).toBe('Announcement');
+    expect(m.components).toHaveLength(4); // no "line under the title"
+    const form = fakeModal({
+      customId: m.custom_id,
+      fields: { title: '', body: 'Servers restart at 8pm. @here', signature: 'Maj_Test', buttons: '' },
+      roles: [IDS.seniorRole],
+      client: fc,
+    });
+    await run(services, form.interaction);
+    expect(replyText(form.replies.at(-1))).toMatch(/✅ Posted in <#600000000000000002>/);
+    const p = fc.sent[0]!;
+    expect(p.payload.flags).toBe(MessageFlags.IsComponentsV2);
+    expect(p.payload.allowedMentions).toEqual({ parse: ['everyone'] });
+    const parts = (p.payload.components as { toJSON(): { type: number } }[]).map((c) => c.toJSON().type);
+    expect(parts).not.toContain(17); // not boxed
+    const s = shown(p.payload);
+    expect(s).toContain('"content":"@everyone"');
+    expect(s).toContain('Servers restart at 8pm. @​here'); // typed @here can't ping
+    expect(s).toContain(`-# Sent by <@${IDS.staffUser}>`);
+    expect(s).not.toContain('Approved by');
+  });
+
+  it('announcement from a Moderator waits boxed in the queue, then goes out plain', async () => {
+    const services = await setup();
+    const fc = fakeClient();
+    const cmd = fakeInteraction({ commandName: 'post', strings: { kind: 'announcement' }, roles: [IDS.modRole], client: fc });
+    await run(services, cmd.interaction);
+    const id = (cmd.replies.at(-1) as { toJSON(): { custom_id: string } }).toJSON().custom_id;
+    const form = fakeModal({ customId: id, fields: { title: 'Update', body: 'New map.', signature: '', buttons: '' }, roles: [IDS.modRole], client: fc });
+    await run(services, form.interaction);
+    const q = fc.sent[0]!;
+    expect(q.channelId).toBe(APPROVAL);
+    expect(shown(q.payload)).toContain('waiting for approval');
+    expect((q.payload.components as { toJSON(): { type: number } }[]).map((c) => c.toJSON().type)).toContain(17);
+    const approveId = customIds(q.payload).find((c) => c.startsWith('post:approve:'))!;
+    await run(services, fakeButton({ customId: approveId, userId: IDS.otherUser, roles: [IDS.seniorRole], client: fc }).interaction);
+    const live = fc.sent[1]!;
+    expect(live.channelId).toBe(POSTS);
+    expect((live.payload.components as { toJSON(): { type: number } }[]).map((c) => c.toJSON().type)).not.toContain(17);
+    expect(shown(live.payload)).toContain('## Update');
+    expect(String(fc.dms[0]?.payload.content)).toMatch(/Your Announcement "Update" was approved/);
   });
 
   it('keeps the text when a button line is wrong, and reopens the form filled in', async () => {

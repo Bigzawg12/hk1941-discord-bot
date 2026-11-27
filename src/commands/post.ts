@@ -8,7 +8,7 @@ import {
   neutralise,
   parseButtons,
   POST_KINDS,
-  renderPost,
+  renderDraft,
   type ColourName,
   type Ping,
   type PostDraft,
@@ -42,6 +42,14 @@ interface PostForm {
 
 function postModal(token: string, form: PostForm) {
   const v = form.values ?? {};
+  if (form.kind === 'announcement') {
+    return modal(`post:compose:${token}`, 'Announcement', [
+      field('title', 'Heading (optional)', { max: 100, placeholder: 'Server update', value: v.title }),
+      field('body', 'Text', { long: true, required: true, max: 3500, placeholder: 'Markdown works: **bold**, - lists, [link text](https://…), #channel-name', value: v.body }),
+      field('signature', 'Signature (optional)', { long: true, max: 300, placeholder: 'Your name\nRank', value: v.signature }),
+      field('buttons', 'Link buttons (one per line)', { long: true, max: 600, placeholder: 'Read more | https://…', value: v.buttons }),
+    ]);
+  }
   return modal(`post:compose:${token}`, `${POST_KINDS[form.kind].label} post`, [
     field('title', 'Title', { required: true, max: 100, placeholder: ':badge: | Royal Rifles of Canada', value: v.title }),
     field('subtitle', 'Line under the title', { max: 100, placeholder: 'C Force, Hong Kong (optional)', value: v.subtitle }),
@@ -57,13 +65,15 @@ const COLOUR_OPTIONS = (Object.keys(COLOUR_CHOICES) as ColourName[]).map((c) => 
 /**
  * /post: a signed post like a unit's recruitment notice or a shout. It shows who sent it and who
  * approved it. The text is written in a form (title, unit line, body, signature, link buttons).
+ * Kind "Announcement" is a plain message instead: heading, text, signature, with a small
+ * "Sent by" line and no box.
  */
 export default defineCommand({
   tier: Tier.TrialModerator,
-  help: 'Write a signed post (recruitment, shout, notice, orders…). Senior staff approve it first unless you are one.',
+  help: 'Send an announcement or a signed post (recruitment, shout, notice, orders…). Senior staff approve it first unless you are one.',
   data: new SlashCommandBuilder()
     .setName('post')
-    .setDescription('Write a signed post; it goes to the approval channel first unless you can approve')
+    .setDescription('Send an announcement or signed post (recruitment…); approvers check it unless you are one')
     .setContexts(InteractionContextType.Guild)
     .addStringOption((o) => o.setName('kind').setDescription('What sort of post').setRequired(true).addChoices(...KIND_CHOICES))
     .addChannelOption((o) =>
@@ -72,7 +82,7 @@ export default defineCommand({
     .addStringOption((o) => o.setName('ping').setDescription('Ping when it goes out').addChoices({ name: '@here', value: 'here' }, { name: '@everyone', value: 'everyone' }))
     .addRoleOption((o) => o.setName('ping-role').setDescription('Or ping this role instead'))
     .addAttachmentOption((o) => o.setName('image').setDescription('A picture shown under the post (PNG, JPG, GIF or WebP, up to 8 MB)'))
-    .addStringOption((o) => o.setName('colour').setDescription('Colour of the bar on the left (default: by kind)').addChoices(...COLOUR_OPTIONS)),
+    .addStringOption((o) => o.setName('colour').setDescription('Colour of the bar on the left (default: by kind; announcements have none)').addChoices(...COLOUR_OPTIONS)),
 
   async execute(ctx) {
     const { interaction, services } = ctx;
@@ -107,7 +117,8 @@ export default defineCommand({
       return;
     }
     const get = (k: string) => interaction.fields.getTextInputValue(k).trim();
-    form.values = { title: get('title'), subtitle: get('subtitle'), body: get('body'), signature: get('signature'), buttons: get('buttons') };
+    const plain = form.kind === 'announcement'; // its form has no "line under the title"
+    form.values = { title: get('title'), subtitle: plain ? '' : get('subtitle'), body: get('body'), signature: get('signature'), buttons: get('buttons') };
     const tidy = (s: string) => neutralise(expandText(s, interaction.guild));
     let draft: PostDraft;
     try {
@@ -122,7 +133,7 @@ export default defineCommand({
         colour: form.colour,
         ping: form.ping,
       };
-      renderPost(draft, { authorId: form.authorId, approvedBy: 'x'.repeat(40) }); // too long? say so now
+      renderDraft(draft, { authorId: form.authorId, approvedBy: 'x'.repeat(40) }); // too long? say so now
     } catch (err) {
       if (err instanceof UserFacingError) return retryReply(interaction, err.message, `post:reopen:${id}`);
       throw err;

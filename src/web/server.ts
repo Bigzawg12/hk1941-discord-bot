@@ -343,7 +343,7 @@ export function createDashboard(deps: DashboardDeps) {
     }
     const kind = POST_KINDS[d.kind];
     return html`<div class="approval-top">${badge(kind?.label ?? d.kind, 'accent')}${badge(ping, d.ping.kind === 'none' ? 'muted' : 'warn')}</div>
-      <h3>${d.title}</h3>${d.subtitle ? html`<p class="muted">${d.subtitle}</p>` : ''}
+      ${d.title ? html`<h3>${d.title}</h3>` : ''}${d.subtitle ? html`<p class="muted">${d.subtitle}</p>` : ''}
       <div class="preview">${d.body}${d.signature ? `\n\n— ${d.signature}` : ''}</div>
       ${d.buttons.length ? html`<div class="links-out">${d.buttons.map((b) => html`<a class="btn sm secondary" href="${safeUrl(b.url)}" target="_blank" rel="noreferrer noopener">${b.label} ${icon('external')}</a>`)}</div>` : ''}`;
   }

@@ -308,7 +308,7 @@ input[type=checkbox]{width:18px;height:18px;min-height:0;accent-color:var(--acce
 @media (max-width:900px){.approval{grid-template-columns:minmax(0,1fr)}}
 .approval-main{padding:18px 20px;border-left:4px solid var(--accent);min-width:0}
 .approval-side{padding:18px 20px;background:var(--panel-2);border-left:1px solid var(--line);display:flex;flex-direction:column;gap:12px}
-.kind-recruitment{border-left-color:#3b7d3b}.kind-shout{border-left-color:#3a5f8a}.kind-notice{border-left-color:#8a7a4a}.kind-orders{border-left-color:#a33b3b}.kind-training{border-left-color:#5b6e3a}.kind-event{border-left-color:#c08a2a}.kind-ssu{border-left-color:#c23b3b}
+.kind-announcement{border-left-color:#6b6f73}.kind-recruitment{border-left-color:#3b7d3b}.kind-shout{border-left-color:#3a5f8a}.kind-notice{border-left-color:#8a7a4a}.kind-orders{border-left-color:#a33b3b}.kind-training{border-left-color:#5b6e3a}.kind-event{border-left-color:#c08a2a}.kind-ssu{border-left-color:#c23b3b}
 .approval-top{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin-bottom:10px}
 .approval h3{font-size:1.15rem;margin:0 0 2px}
 .preview{white-space:pre-wrap;word-break:break-word;background:var(--panel-2);border:1px solid var(--line);border-radius:10px;padding:12px 14px;margin:12px 0 0;max-height:320px;overflow:auto}

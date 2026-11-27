@@ -24,6 +24,7 @@ import { bannerFile, type ImageFile } from './images.js';
 import {
   allowedMentionsFor,
   draftLabel,
+  liveComponents,
   renderDecision,
   renderDraft,
   textBlock,
@@ -157,9 +158,9 @@ export async function publish(
 ): Promise<{ message: Message; url: string }> {
   const ch = await sendableChannel(client, p.channelId);
   const draft = { ...p.draft, imageName: image ? image.name : undefined } as Draft;
-  const container = renderDraft(draft, { authorId: p.authorId, approvedBy, ...(await ssuMeta(services, draft)) });
+  const components = liveComponents(draft, { authorId: p.authorId, approvedBy, ...(await ssuMeta(services, draft)) });
   const message = await ch.send({
-    components: [container],
+    components,
     flags: MessageFlags.IsComponentsV2,
     files: image ? [image] : [],
     allowedMentions: allowedMentionsFor(draft.ping, true),
