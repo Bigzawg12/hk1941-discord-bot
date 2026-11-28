@@ -564,3 +564,37 @@ describe('activity', () => {
     expect(await (await req('/members/99')).text()).toContain('trainings in 30 days');
   });
 });
+
+describe('limiting what people see to their own groups', () => {
+  const OFFICER = '777000000000000001';
+
+  it('a person limited to one division sees nothing of the others', async () => {
+    const { as, post, services } = await start();
+    await services.links.linkVerified(OFFICER, { id: 42, name: 'Lt_Officer' }, 'manual');
+    await post('/groups', { action: 'add', group: String(DIV) });
+    await post('/access', { action: 'set', discordId: OFFICER, level: '2', [`s_${DIV}`]: '1' });
+    const lt = await as(OFFICER);
+    const groups = await (await lt.req('/groups')).text();
+    expect(groups).toContain('Royal Rifles of Canada');
+    expect(groups).not.toContain('Canadian Army 1940s');
+    expect((await lt.req(`/groups/${ARMY}`)).status).toBe(403);
+    expect((await lt.req('/promotions')).status).toBe(403);
+    expect(await (await lt.req('/')).text()).not.toContain('href="/promotions"');
+    const member = await (await lt.req('/members/99')).text(); // Pte_Target is in the division too
+    expect(member).not.toContain('Next on the ladder');
+    expect(member).toContain('Royal Rifles of Canada');
+    expect((await lt.post(`/groups/${ARMY}`, { action: 'rank', userId: '99', roleId: '3', expectRoleId: '2' })).status).toBe(403);
+  });
+
+  it('or automatically, to the groups they are a member of', async () => {
+    const { as, post, services } = await start();
+    await services.links.linkVerified(OFFICER, { id: 42, name: 'Lt_Officer' }, 'manual');
+    await post('/groups', { action: 'add', group: String(DIV) });
+    await post('/access', { action: 'rules', officer_rank: '9', scopeByMembership: '1' });
+    const lt = await as(OFFICER); // Lt_Officer is only in the army group
+    const groups = await (await lt.req('/groups')).text();
+    expect(groups).toContain('Canadian Army 1940s');
+    expect(groups).not.toContain('Royal Rifles of Canada');
+    expect((await lt.req(`/groups/${DIV}`)).status).toBe(403);
+  });
+});

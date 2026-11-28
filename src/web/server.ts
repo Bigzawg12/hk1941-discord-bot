@@ -258,8 +258,12 @@ export function createDashboard(deps: DashboardDeps) {
    * "who can change ranks here" rank they hold in that group, or one an owner gave them by hand.
    * (Their own rank there still limits what they can give.)
    */
+  /** Groups limited by the Access page: may they see this group at all? */
+  const canSee = (r: Req, groupId: number) => !r.access?.scope || r.access.scope.includes(groupId);
+  const notYours = () => new Forbidden(Level.Admin, 'This group isn’t one of yours. An owner can change which groups you see on the Access page.');
+
   async function canManageGroup(r: Req, groupId: number): Promise<boolean> {
-    if (!can(r, Level.Officer)) return false;
+    if (!can(r, Level.Officer) || !canSee(r, groupId)) return false;
     if (can(r, Level.Admin)) return true;
     const person = (await accessStore.get()).people[r.session.user!.id];
     if (person?.groups?.includes(groupId)) return true;
@@ -307,7 +311,8 @@ export function createDashboard(deps: DashboardDeps) {
   async function page(r: Req, opts: { title: string; nav?: string; body: Html; refreshSec?: number }): Promise<string> {
     const level = r.access?.level ?? 0;
     const approvals = level >= Level.Admin ? (await myPending(r)).length : 0;
-    return layout({ ...opts, session: r.session, counts: { approvals }, path: r.url.pathname + r.url.search, level });
+    const hide = canSee(r, services.config.roblox.armyGroupId) ? [] : ['promotions'];
+    return layout({ ...opts, session: r.session, counts: { approvals }, path: r.url.pathname + r.url.search, level, hide });
   }
 
   /** Discord name and avatar; fetches at most `budget.n` users that aren't cached yet. */
@@ -907,6 +912,7 @@ export function createDashboard(deps: DashboardDeps) {
   }
 
   async function promotionsPage(r: Req): Promise<string> {
+    if (!canSee(r, services.config.roblox.armyGroupId)) throw notYours();
     const tabParam = r.url.searchParams.get('tab');
     const tabs = PROMO_TABS.filter(([k]) => k !== 'settings' || can(r, Level.Admin));
     const tab: PromoTab = tabs.some(([k]) => k === tabParam) ? (tabParam as PromoTab) : 'queue';
@@ -1085,6 +1091,7 @@ export function createDashboard(deps: DashboardDeps) {
   }
 
   async function promotionsAction(r: Req): Promise<Redirect> {
+    if (!canSee(r, services.config.roblox.armyGroupId)) throw notYours();
     const by = r.session.user!;
     const byName = by.globalName ?? by.username;
     if (r.form.action === 'settings' || r.form.action === 'settings-reset') {
@@ -1154,7 +1161,7 @@ export function createDashboard(deps: DashboardDeps) {
       if (u) return new Redirect(`/members/${u.id}`);
       notFound = true;
     }
-    const recent = (await services.promotionLog.list()).slice(0, 8);
+    const recent = (await services.promotionLog.list()).filter((e) => canSee(r, e.groupId)).slice(0, 8);
     const who = await people(recent.map((e) => e.userId));
     return page(r, {
       title: 'Members',
@@ -1180,6 +1187,11 @@ export function createDashboard(deps: DashboardDeps) {
   async function memberPage(r: Req, id: number): Promise<string> {
     const user = await services.users.getById(id);
     if (!user) throw new UserFacingError('There is no Roblox user with that ID.');
+    if (r.access?.scope) {
+      const theirs = await services.groups.userRanks(id).catch(() => []);
+      if (!theirs.some((g) => g.rank > 0 && canSee(r, g.groupId))) throw new Forbidden(Level.Admin, 'They aren’t in any of your groups.');
+    }
+    const armyVisible = canSee(r, services.config.roblox.armyGroupId);
     const group = services.config.roblox.armyGroupId;
     const [rank, roles, profile, ban, link, heads, history, log, staff] = await Promise.all([
       services.groups.rankIn(group, id).catch(() => null),
@@ -1247,8 +1259,9 @@ export function createDashboard(deps: DashboardDeps) {
     );
 
     const divisionsCard = await memberGroupsCard(r, id);
+    const promoShown = armyVisible ? promo : '';
     if (!d) {
-      return page(r, { title: user.name, nav: 'members', body: html`${head}${promo}${divisionsCard}${card('Service record', empty('No service record', 'They have never played Hong Kong 1941, or their record could not be read.'))}` });
+      return page(r, { title: user.name, nav: 'members', body: html`${head}${promoShown}${divisionsCard}${card('Service record', empty('No service record', 'They have never played Hong Kong 1941, or their record could not be read.'))}` });
     }
 
     const pts = computePoints(d);
@@ -1336,7 +1349,7 @@ export function createDashboard(deps: DashboardDeps) {
       nav: 'members',
       body: html`${head}${stats}
       <div class="grid-2">
-        <div class="stack">${promo}${divisionsCard}${discipline}${trainingCard}</div>
+        <div class="stack">${promoShown}${divisionsCard}${discipline}${trainingCard}</div>
         <div class="stack">${medalsCard}${pointsCard}${serviceCard}${adjustCard}</div>
       </div>`,
     });
@@ -1346,7 +1359,8 @@ export function createDashboard(deps: DashboardDeps) {
   async function memberGroupsCard(r: Req, id: number): Promise<Html | ''> {
     const army = services.config.roblox.armyGroupId;
     if (!(await services.divisions.list()).some((e) => e.groupId !== army)) return '';
-    const views = (await groupViews()).filter((g) => g.groupId !== army);
+    const views = (await groupViews()).filter((g) => g.groupId !== army && canSee(r, g.groupId));
+    if (!views.length) return '';
     const theirs = await services.groups.userRanks(id).catch(() => []);
     const manage = new Map(await Promise.all(views.map(async (g) => [g.groupId, await canManageGroup(r, g.groupId)] as const)));
     const rows = await Promise.all(
@@ -1367,6 +1381,7 @@ export function createDashboard(deps: DashboardDeps) {
 
   async function memberAction(r: Req, id: number): Promise<void> {
     if (r.form.action !== 'rank') throw new UserFacingError('Unknown action.');
+    if (!canSee(r, services.config.roblox.armyGroupId)) throw notYours();
     await needManage(r, services.config.roblox.armyGroupId);
     const by = r.session.user!;
     const change = await changeRank(services, {
@@ -1435,7 +1450,7 @@ export function createDashboard(deps: DashboardDeps) {
   }
 
   async function groupsPage(r: Req): Promise<string> {
-    const views = await groupViews();
+    const views = (await groupViews()).filter((g) => canSee(r, g.groupId));
     const admin = can(r, Level.Admin);
     const top = views.filter((g) => g.isMain || g.isArmy).sort((a, b) => Number(b.isMain) - Number(a.isMain));
     const divisions = views.filter((g) => !g.isMain && !g.isArmy).sort((a, b) => a.name.localeCompare(b.name));
@@ -1485,6 +1500,7 @@ export function createDashboard(deps: DashboardDeps) {
   async function groupPage(r: Req, groupId: number): Promise<string> {
     const [g] = await groupViews(groupId);
     if (!g) throw new NotFound();
+    if (!canSee(r, groupId)) throw notYours();
     const tabParam = r.url.searchParams.get('tab');
     const groupTabs = GROUP_TABS.filter(([k]) => k !== 'settings' || can(r, Level.Admin));
     const tab: GroupTab = groupTabs.some(([k]) => k === tabParam) ? (tabParam as GroupTab) : 'members';
@@ -1710,6 +1726,7 @@ export function createDashboard(deps: DashboardDeps) {
       return `/groups/${groupId}`;
     }
     const groupId = Number(r.url.pathname.split('/')[2]);
+    if (!canSee(r, groupId)) throw notYours();
     const entry = await services.divisions.get(groupId);
     if (groupId !== army && !entry) throw new NotFound();
     const base: DivisionEntry = entry ?? { groupId, addedAt: now(), addedBy: byName };
@@ -2423,7 +2440,7 @@ export function createDashboard(deps: DashboardDeps) {
           const link = await services.links.get(id).catch(() => null);
           return html`<tr><td>${faceHtml(await face(id, budget), html`<code>${id}</code>`)}</td>
             <td>${link ? html`<a href="/members/${link.robloxId}">${link.robloxName}</a>` : html`<span class="muted">not linked</span>`}</td>
-            <td>${badge(LEVEL_NAMES[p.level], p.level === 0 ? 'bad' : p.level >= 3 ? 'accent' : 'muted')}${p.note ? html` <small class="muted">${p.note}</small>` : ''}${p.groups?.length ? html`<br><small class="muted">Also manages: ${p.groups.map((id) => groupNames.get(id) ?? id).join(', ')}</small>` : ''}</td>
+            <td>${badge(LEVEL_NAMES[p.level], p.level === 0 ? 'bad' : p.level >= 3 ? 'accent' : 'muted')}${p.note ? html` <small class="muted">${p.note}</small>` : ''}${p.scope?.length ? html`<br><small class="muted">Only sees: ${p.scope.map((id) => groupNames.get(id) ?? id).join(', ')}</small>` : ''}${p.groups?.length ? html`<br><small class="muted">Also manages: ${p.groups.map((id) => groupNames.get(id) ?? id).join(', ')}</small>` : ''}</td>
             <td class="nowrap muted">${p.by} · ${ago(now() - p.at)}</td>
             <td class="right"><form method="post" action="/access">${csrfField(r.session)}<input type="hidden" name="action" value="unset"><input type="hidden" name="discordId" value="${id}"><button class="secondary sm">Remove</button></form></td></tr>`;
         }),
@@ -2446,6 +2463,7 @@ export function createDashboard(deps: DashboardDeps) {
             ${ruleRow('admin', Level.Admin)}${ruleRow('officer', Level.Officer)}${ruleRow('viewer', Level.Viewer)}
           </tbody></table></div>
           <p class="hint">The highest level whose rule they meet wins. Leave everything off to keep the dashboard to the owners and the people below.</p>
+          <label class="check"><input type="checkbox" name="scopeByMembership" value="1"${settings.scopeByMembership ? new Html(' checked') : ''}> Viewers and Officers only see the groups they’re a member of on Roblox (unless their own list below says otherwise)</label>
           <div class="btn-row"><button>Save rules</button></div></form>`,
       )}
       ${card(
@@ -2456,6 +2474,7 @@ export function createDashboard(deps: DashboardDeps) {
           ${field('Level', 'level', select('level', LEVEL_OPTIONS, '1', { none: null }))}
           ${field('Note (optional)', 'note', html`<input id="note" name="note" maxlength="80" placeholder="e.g. Royal Rifles OC">`)}
           <button>Set</button>
+          <fieldset class="group-picks"><legend>Only sees these groups (leave all unticked for no limit; Viewers and Officers)</legend>${groupsList.map((g) => html`<label class="check"><input type="checkbox" name="s_${g.groupId}" value="1"> ${g.name}</label>`)}</fieldset>
           <fieldset class="group-picks"><legend>Officers: may also change ranks in</legend>${groupsList.map((g) => html`<label class="check"><input type="checkbox" name="g_${g.groupId}" value="1"> ${g.name}</label>`)}</fieldset></form>`,
       )}`,
     });
@@ -2470,6 +2489,7 @@ export function createDashboard(deps: DashboardDeps) {
         const n = Number(v);
         return Number.isInteger(n) && n >= 1 && n <= max ? n : undefined;
       };
+      settings.scopeByMembership = f.scopeByMembership === '1' || undefined;
       for (const key of ['viewer', 'officer', 'admin'] as const) {
         const rule = { armyRank: read(f[`${key}_rank`], 254), staffTier: read(f[`${key}_tier`], 5) };
         if (rule.armyRank || rule.staffTier) settings.rules[key] = rule;
@@ -2487,7 +2507,8 @@ export function createDashboard(deps: DashboardDeps) {
       const level = Number(f.level);
       if (![0, 1, 2, 3].includes(level)) throw new UserFacingError('Pick a level.');
       const groups = Object.keys(f).filter((k) => /^g_\d{1,15}$/.test(k) && f[k] === '1').map((k) => Number(k.slice(2)));
-      settings.people[id] = { level: level as 0 | 1 | 2 | 3, note: (f.note ?? '').trim().slice(0, 80) || undefined, by, at: now(), groups: groups.length ? groups : undefined };
+      const scope = Object.keys(f).filter((k) => /^s_\d{1,15}$/.test(k) && f[k] === '1').map((k) => Number(k.slice(2)));
+      settings.people[id] = { level: level as 0 | 1 | 2 | 3, note: (f.note ?? '').trim().slice(0, 80) || undefined, by, at: now(), groups: groups.length ? groups : undefined, scope: scope.length ? scope : undefined };
       await accessStore.set(settings);
       await audit(r, 'Dashboard access set', `<@${id}> → ${LEVEL_NAMES[level as Level]}`);
       flash(r.session, 'ok', `Set to ${LEVEL_NAMES[level as Level]}.`);

@@ -36,7 +36,21 @@ export interface AccessRule {
 export interface AccessSettings {
   rules: Partial<Record<'viewer' | 'officer' | 'admin', AccessRule>>;
   /** per person, by Discord ID; beats the rules (0 = blocked) */
-  people: Record<string, { level: Exclude<Level, 4>; note?: string; by: string; at: number; /** extra groups an Officer may change ranks in */ groups?: number[] }>;
+  people: Record<
+    string,
+    {
+      level: Exclude<Level, 4>;
+      note?: string;
+      by: string;
+      at: number;
+      /** extra groups an Officer may change ranks in */
+      groups?: number[];
+      /** if set, the only groups they can see anything about (Viewers and Officers) */
+      scope?: number[];
+    }
+  >;
+  /** Viewers and Officers without their own list only see the groups they're a member of */
+  scopeByMembership?: boolean;
 }
 
 const RULE_LEVELS = [
@@ -87,10 +101,27 @@ export interface AccessCheck {
   robloxName?: string;
   armyRank?: number;
   staffTier?: number;
+  /** the only groups they may see; null/undefined = every group (Admins, owners, or no limit) */
+  scope?: number[] | null;
+}
+
+/** Their level, plus which groups they may see. */
+export async function checkAccess(services: Services, access: AccessStore, discordId: string, ownerIds: string[]): Promise<AccessCheck> {
+  const check = await checkLevel(services, access, discordId, ownerIds);
+  if (check.level === Level.None || check.level >= Level.Admin) return { ...check, scope: null };
+  const settings = await access.get();
+  const person = settings.people[discordId];
+  if (person?.scope?.length) return { ...check, scope: person.scope };
+  if (settings.scopeByMembership && check.robloxId) {
+    const tracked = new Set([services.config.roblox.armyGroupId, ...(await services.divisions.list()).map((e) => e.groupId)]);
+    const mine = await services.groups.userRanks(check.robloxId).catch(() => []);
+    return { ...check, scope: mine.filter((g) => g.rank > 0 && tracked.has(g.groupId)).map((g) => g.groupId) };
+  }
+  return { ...check, scope: null };
 }
 
 /** Work out someone's level. Never throws: if Roblox can't be reached, the rules can't match. */
-export async function checkAccess(services: Services, access: AccessStore, discordId: string, ownerIds: string[]): Promise<AccessCheck> {
+async function checkLevel(services: Services, access: AccessStore, discordId: string, ownerIds: string[]): Promise<AccessCheck> {
   const link = await services.links.get(discordId).catch(() => null);
   const base = { robloxId: link?.robloxId, robloxName: link?.robloxName };
   if (ownerIds.includes(discordId)) return { ...base, level: Level.Owner, why: 'Owner (DASHBOARD_ADMIN_IDS)' };

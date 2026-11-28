@@ -115,14 +115,14 @@ export interface NavCounts {
   approvals?: number;
 }
 
-export function layout(opts: { title: string; session: Session; body: Html; nav?: string; counts?: NavCounts; bare?: boolean; path?: string; refreshSec?: number; level?: number }): string {
+export function layout(opts: { title: string; session: Session; body: Html; nav?: string; counts?: NavCounts; bare?: boolean; path?: string; refreshSec?: number; level?: number; hide?: string[] }): string {
   const { session: s } = opts;
   const flash = s.flash;
   s.flash = undefined;
   const light = s.theme === 'light';
   const lvl = opts.level ?? 4;
   const item = (href: string, label: string, key: string, count?: number, min = 1) =>
-    lvl < min
+    lvl < min || opts.hide?.includes(key)
       ? ''
       : html`<a href="${href}" class="nav-item"${opts.nav === key ? new Html(' aria-current="page"') : ''}><span>${label}</span>${count ? html`<span class="count">${count}</span>` : ''}</a>`;
   const signedIn = !!s.user && !opts.bare;
