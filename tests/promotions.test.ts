@@ -1,5 +1,9 @@
 import { afterEach, describe, expect, it } from 'vitest';
+import { POINTS, RANKS } from '../src/game/gameConfig.js';
+import { computePoints } from '../src/game/points.js';
 import { progressOf, rosterFor } from '../src/game/promotions.js';
+import { applySettings, cleanSettings } from '../src/game/serviceSettings.js';
+import { ActivityTracker, statusOf } from '../src/game/activity.js';
 import { createDashboard } from '../src/web/server.js';
 import { handleInteraction } from '../src/discord/dispatch.js';
 import { loadCommands } from '../src/loaders/commands.js';
@@ -31,6 +35,9 @@ afterEach(async () => {
 
 async function start(over: { bannedUntil?: number; patchStatus?: number } = {}) {
   const patches: Call[] = [];
+  const writes: Call[] = [];
+  const published: Call[] = [];
+  let saved: unknown = null;
   const { services } = testServices(
     [
       ['GET', `/cloud/v2/groups/${ARMY}/roles`, () => json({ groupRoles: ROLES })],
@@ -47,7 +54,7 @@ async function start(over: { bannedUntil?: number; patchStatus?: number } = {}) 
         `/cloud/v2/groups/${ARMY}/memberships`,
         (url) => {
           const f = url.searchParams.get('filter') ?? '';
-          return json({ groupMemberships: f.includes('roles/2') || f.includes('users/99') ? [MEMBERSHIP] : [] });
+          return json({ groupMemberships: !f || f.includes('roles/2') || f.includes('users/99') ? [MEMBERSHIP] : [] });
         },
       ],
       [
@@ -55,11 +62,14 @@ async function start(over: { bannedUntil?: number; patchStatus?: number } = {}) 
         `/cloud/v2/groups/${ARMY}/memberships/m99`,
         (_u, call) => (over.patchStatus ? json({ code: 'PERMISSION_DENIED', message: 'Insufficient permissions.' }, over.patchStatus) : (patches.push(call), json({}))),
       ],
+      ['GET', 'groups.roblox.com/v2/users/42/groups/roles', () => json({ data: [{ group: { id: ARMY }, role: { id: 9, name: 'Lieutenant', rank: 9 } }] })],
       ['GET', 'groups.roblox.com/v2/users/99/groups/roles', () => json({ data: [{ group: { id: ARMY }, role: { id: 2, name: 'Private', rank: 2 } }, { group: { id: DIV }, role: { id: 51, name: 'Rifleman', rank: 1 } }] })],
       ['POST', 'users.roblox.com/v1/usernames/users', () => json({ data: [{ id: 99, name: 'Pte_Target', displayName: 'Target' }] })],
       ['POST', 'users.roblox.com/v1/users', () => json({ data: [{ id: 99, name: 'Pte_Target', displayName: 'Target' }] })],
       ['GET', 'users.roblox.com/v1/users/99', () => json({ id: 99, name: 'Pte_Target', displayName: 'Target', description: '' })],
       ['GET', 'thumbnails.roblox.com', () => json({ data: [{ targetId: 99, state: 'Completed', imageUrl: 'https://tr.rbxcdn.com/head.png' }] })],
+      ['POST', 'standard-datastores/datastore/entries/entry', (_u, call) => ((saved = call.body), writes.push(call), json({}))],
+      ['POST', 'messaging-service/v1', (_u, call) => (published.push(call), json({}))],
       [
         'GET',
         'standard-datastores/datastore/entries/entry',
@@ -68,6 +78,7 @@ async function start(over: { bannedUntil?: number; patchStatus?: number } = {}) 
           if (key === 'u99') return json(profileStoreValue(SAMPLE_PROFILE));
           if (key === 'HK1941_AdminLog/recent') return json([{ t: 1_795_700_000, by: 'Sgt_Mod', text: ';kick Pte_Target spamming the radio' }]);
           if (key === 'HK1941_Staff/list') return json({});
+          if (key === 'HK1941_Config/service' && saved) return json(saved);
           if (key === 'HK1941_Bans/u99' && over.bannedUntil !== undefined) return json({ untilT: over.bannedUntil, reason: 'Exploiting', by: 'Maj_X' });
           return json({ error: 'NOT_FOUND' }, 404);
         },
@@ -77,28 +88,35 @@ async function start(over: { bannedUntil?: number; patchStatus?: number } = {}) 
   );
   const fc = fakeClient();
   fc.client.guilds.cache.set(IDS.guild, fakeGuild().guild);
-  const discord = async (input: string | URL | Request) => {
+  // Discord sign-in: the code is the Discord ID that signs in
+  const discord = async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = String(input);
-    if (url.endsWith('/oauth2/token')) return json({ access_token: 'tok', token_type: 'Bearer' });
-    return json({ id: ADMIN, username: 'owner', global_name: 'The Owner', avatar: null });
+    if (url.endsWith('/oauth2/token')) return json({ access_token: new URLSearchParams(String(init.body)).get('code'), token_type: 'Bearer' });
+    const id = String((init.headers as Record<string, string>).authorization ?? '').replace('Bearer ', '');
+    return json({ id, username: id === ADMIN ? 'owner' : 'officer', global_name: id === ADMIN ? 'The Owner' : 'Lt Officer', avatar: null });
   };
-  const dash = createDashboard({ services, client: () => fc.client as never, fetch: discord as never, gameLogPollMs: 0, scanWaitMs: 5000 });
+  const dash = createDashboard({ services, client: () => fc.client as never, fetch: discord as never, gameLogPollMs: 0, scanWaitMs: 5000, accessFile: null });
   open.push(dash);
   const base = `http://127.0.0.1:${await dash.listen(0, '127.0.0.1')}`;
-  let cookie = '';
-  const req = async (path: string, init: RequestInit = {}) => {
-    const res = await fetch(base + path, { ...init, redirect: 'manual', headers: { ...(init.headers ?? {}), cookie } });
-    const set = res.headers.get('set-cookie');
-    if (set) cookie = set.split(';')[0]!;
-    return res;
+  /** A browser signed in as one Discord user. */
+  const as = async (discordId: string) => {
+    let cookie = '';
+    const req = async (path: string, init: RequestInit = {}) => {
+      const res = await fetch(base + path, { ...init, redirect: 'manual', headers: { ...(init.headers ?? {}), cookie } });
+      const set = res.headers.get('set-cookie');
+      if (set) cookie = set.split(';')[0]!;
+      return res;
+    };
+    const go = await req('/auth/discord');
+    const signIn = await req(`/auth/discord/callback?code=${discordId}&state=${new URL(go.headers.get('location')!).searchParams.get('state')}`);
+    const csrf = /name="_csrf" value="([^"]+)"/.exec(await (await req('/members')).text())?.[1] ?? '';
+    const post = (path: string, body: Record<string, string>) =>
+      req(path, { method: 'POST', body: new URLSearchParams({ _csrf: csrf, ...body }).toString(), headers: { 'content-type': 'application/x-www-form-urlencoded' } });
+    return { req, post, signIn };
   };
-  const go = await req('/auth/discord');
-  await req(`/auth/discord/callback?code=x&state=${new URL(go.headers.get('location')!).searchParams.get('state')}`);
-  const csrf = /name="_csrf" value="([^"]+)"/.exec(await (await req('/members')).text())?.[1] ?? '';
-  const post = (path: string, body: Record<string, string>) =>
-    req(path, { method: 'POST', body: new URLSearchParams({ _csrf: csrf, ...body }).toString(), headers: { 'content-type': 'application/x-www-form-urlencoded' } });
+  const { req, post } = await as(ADMIN);
   await services.adminLog.refresh();
-  return { services, req, post, patches, fc };
+  return { services, req, post, patches, fc, writes, published, as };
 }
 
 describe('promotions', () => {
@@ -228,7 +246,16 @@ describe('after a rank change', () => {
       s.verifiedRoleId = VERIFIED;
     });
     await post('/members/99', { action: 'rank', roleId: '3', expectRoleId: '2' });
-    expect(await (await req('/members/99')).text()).toContain('Discord roles updated');
+    expect(await (await req('/members/99')).text()).toContain('Discord roles and nickname are updated');
+  });
+
+  it('says so when nothing changed in Discord, or they aren’t linked', async () => {
+    const { post, req, services } = await start();
+    await post('/members/99', { action: 'rank', roleId: '3', expectRoleId: '2' });
+    expect(await (await req('/members/99')).text()).toContain('no linked Discord account');
+    await services.links.linkVerified(IDS.staffUser, { id: 99, name: 'Pte_Target' }, 'manual');
+    await post('/members/99', { action: 'rank', roleId: '3', expectRoleId: '2' });
+    expect(await (await req('/members/99')).text()).toContain('no rank bind matches');
   });
 
   it('explains when Roblox refuses', async () => {
@@ -298,5 +325,242 @@ describe('/nominate and bulk promotions', () => {
     await post('/promotions', { action: 'bulk', pick_99: '2:3', reason: 'Monthly promotions' });
     expect(patches).toHaveLength(1);
     expect(await (await req('/promotions')).text()).toContain('Promoted 1: Pte_Target → Corporal.');
+  });
+});
+
+describe('point values and rank requirements', () => {
+  afterEach(() => {
+    applySettings({}); // back to the game's defaults for other tests
+  });
+
+  it('keeps only sensible values', () => {
+    expect(cleanSettings({ points: { capture: 9, aiKillsPer: 0, bogus: 5, trainingAttended: -1 }, ranks: { 2: { points: 50 }, 99: { points: 1 } } })).toEqual({
+      v: 1,
+      points: { capture: 9 },
+      ranks: { 2: { points: 50, trainings: undefined } },
+    });
+  });
+
+  it('the dashboard saves them to the data store, tells live servers, and re-scores straight away', async () => {
+    const { req, post, writes, published, services } = await start();
+    const page = await (await req('/promotions?tab=settings')).text();
+    expect(page).toContain('name="p_capture" id="p_capture" value="4"');
+    expect(page).toContain('name="r_2_points" id="r_2_points" value="120"');
+    const form: Record<string, string> = { action: 'settings' };
+    for (const [k, v] of Object.entries(POINTS)) form[`p_${k}`] = String(v);
+    for (const [k, v] of Object.entries(RANKS)) {
+      form[`r_${k}_points`] = String(v.points);
+      form[`r_${k}_trainings`] = String(v.trainings);
+    }
+    form.p_trainingAttended = '20';
+    form.r_2_points = '500';
+    await post('/promotions', form);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]!.url).toContain('entryKey=HK1941_Config%2Fservice');
+    expect(writes[0]!.headers['content-md5']).toMatch(/==$/);
+    expect(writes[0]!.body).toMatchObject({ v: 1, points: { trainingAttended: 20 }, ranks: { 2: { points: 500, trainings: 4 } }, by: 'The Owner' });
+    expect(published[0]!.url).toContain('/topics/HK1941Config');
+    expect(POINTS.trainingAttended).toBe(20);
+    expect(RANKS[2]!.points).toBe(500);
+    expect(computePoints(SAMPLE_PROFILE as never).parts.find(([l]) => l === 'Trainings attended')![1]).toBe(5 * 20);
+    // Pte_Target (rank 2) no longer has enough points, so isn't ready
+    expect(await (await req('/promotions')).text()).not.toContain('pick_99');
+    // a fresh start reads the saved values back
+    applySettings({});
+    await services.serviceSettings.load();
+    expect(RANKS[2]!.points).toBe(500);
+    await post('/promotions', { action: 'settings-reset' });
+    expect(RANKS[2]!.points).toBe(120);
+  });
+});
+
+describe('dashboard access levels', () => {
+  const OFFICER = '777000000000000001';
+
+  it('only owners get in until an owner opens it up', async () => {
+    const { as, services } = await start();
+    await services.links.linkVerified(OFFICER, { id: 42, name: 'Lt_Officer' }, 'manual');
+    const shut = await as(OFFICER);
+    expect(await shut.signIn.text()).toContain('not enough for dashboard access');
+  });
+
+  it('officers by army rank: see and change ranks below their own, but not admin pages', async () => {
+    const { as, post, services, patches } = await start();
+    await services.links.linkVerified(OFFICER, { id: 42, name: 'Lt_Officer' }, 'manual');
+    await post('/access', { action: 'rules', officer_rank: '9', officer_tier: '', viewer_rank: '', viewer_tier: '', admin_rank: '', admin_tier: '' });
+    await post(`/groups/${ARMY}`, { action: 'settings', managerRank: '9' }); // Lieutenants and up manage the army group
+    const lt = await as(OFFICER);
+    const home = await (await lt.req('/')).text();
+    expect(home).toContain('Officer</small>');
+    expect(home).not.toContain('href="/servers"');
+    expect(home).not.toContain('href="/access"');
+    expect((await lt.req('/servers')).status).toBe(403);
+    expect((await lt.req('/access')).status).toBe(403);
+    expect(await (await lt.req('/promotions')).text()).not.toContain('pick_99'); // no bulk for officers
+    expect((await lt.post('/promotions', { action: 'settings' })).status).toBe(403);
+    expect(await (await lt.req('/members/99')).text()).toContain('name="roleId"');
+    // below their own rank: fine
+    await lt.post('/members/99', { action: 'rank', roleId: '3', expectRoleId: '2' });
+    expect(patches).toHaveLength(1);
+    expect((await services.promotionLog.list(99))[0]?.by).toBe('Lt Officer (dashboard)');
+    // their own rank or above: refused
+    await lt.post('/members/99', { action: 'rank', roleId: '9', expectRoleId: '2' });
+    expect(await (await lt.req('/members/99')).text()).toContain('only give ranks below your own');
+    expect(patches).toHaveLength(1);
+  });
+
+  it('a person can be set or blocked by hand', async () => {
+    const { as, post, req, services } = await start();
+    await services.links.linkVerified(OFFICER, { id: 42, name: 'Lt_Officer' }, 'manual');
+    await post('/access', { action: 'set', discordId: OFFICER, level: '1', note: 'Recruiter' });
+    expect(await (await req('/access')).text()).toContain('Recruiter');
+    const viewer = await as(OFFICER);
+    expect(await (await viewer.req('/members/99')).text()).not.toContain('name="roleId"');
+    expect((await viewer.post('/members/99', { action: 'rank', roleId: '3', expectRoleId: '2' })).status).toBe(403);
+    await post('/access', { action: 'rules', viewer_rank: '1' });
+    await post('/access', { action: 'set', discordId: OFFICER, level: '0' });
+    expect(await (await as(OFFICER)).signIn.text()).toContain('Blocked by The Owner');
+  });
+});
+
+describe('per-server checks and the audit log', () => {
+  const ADMIN_ROLE = '700000000000000004';
+
+  async function adminWithoutOwner(withStaffRole: boolean) {
+    const t = await start();
+    await t.services.links.linkVerified(IDS.staffUser, { id: 42, name: 'Lt_Officer' }, 'manual');
+    await t.post('/access', { action: 'set', discordId: IDS.staffUser, level: '3' });
+    if (withStaffRole) {
+      await t.services.guilds.update(IDS.guild, 'test', (s) => {
+        s.staffRoles = { [ADMIN_ROLE]: 4 };
+      });
+      const guild = t.fc.client.guilds.cache.get(IDS.guild) as { members: { fetch(id: string): Promise<{ roles: { cache: Map<string, unknown> } }> } };
+      (await guild.members.fetch(IDS.staffUser)).roles.cache.set(ADMIN_ROLE, {});
+    }
+    return { ...t, admin: await t.as(IDS.staffUser) };
+  }
+
+  it('an Admin who isn’t staff in a Discord server can’t see or change it', async () => {
+    const { admin } = await adminWithoutOwner(false);
+    expect(await (await admin.req('/servers')).text()).not.toContain('HK1941 Test');
+    expect((await admin.req(`/servers/${IDS.guild}`)).status).toBe(403);
+    expect(await (await admin.req('/panels/new')).text()).toContain('Not in any server yet');
+  });
+
+  it('…and one with Administrator there can', async () => {
+    const { admin } = await adminWithoutOwner(true);
+    expect(await (await admin.req('/servers')).text()).toContain('HK1941 Test');
+    expect((await admin.req(`/servers/${IDS.guild}`)).status).toBe(200);
+  });
+
+  it('keeps every action for the Audit log page, with filters and CSV', async () => {
+    const { post, req } = await start();
+    await post('/members/99', { action: 'rank', roleId: '3', expectRoleId: '2', reason: 'Good work' });
+    const page = await (await req('/audit')).text();
+    expect(page).toContain('Promotion');
+    expect(page).toContain('Pte_Target (99)');
+    expect(page).toContain('dashboard');
+    expect(await (await req('/audit?src=discord')).text()).toContain('Nothing matches');
+    const csv = await (await req('/audit.csv')).text();
+    expect(csv.split('\r\n')[0]).toBe('time_utc,discord_id,name,action,target,detail,ok,server');
+    expect(csv).toContain('Private (2) → Corporal (3)');
+  });
+});
+
+describe('which groups an Officer can change ranks in', () => {
+  const OFFICER = '777000000000000001';
+
+  it('none until a group says which of its ranks can, or an owner adds the group for them', async () => {
+    const { as, post, services, patches } = await start();
+    await services.links.linkVerified(OFFICER, { id: 42, name: 'Lt_Officer' }, 'manual');
+    await post('/groups', { action: 'add', group: String(DIV) });
+    await post('/access', { action: 'rules', officer_rank: '9' });
+    const lt = await as(OFFICER);
+    // the army group has no "who can change ranks here" yet
+    expect(await (await lt.req('/members/99')).text()).not.toContain('name="expectRoleId" value="2"');
+    await lt.post('/members/99', { action: 'rank', roleId: '3', expectRoleId: '2' });
+    expect(await (await lt.req('/members/99')).text()).toContain('can’t change ranks in this group');
+    expect(patches).toHaveLength(0);
+    // an owner gives them the division by hand
+    await post('/access', { action: 'set', discordId: OFFICER, level: '2', [`g_${DIV}`]: '1' });
+    const lt2 = await as(OFFICER);
+    expect(await (await lt2.req(`/groups/${DIV}`)).text()).toContain('Change rank');
+    expect(await (await lt2.req(`/groups/${ARMY}`)).text()).not.toContain('Change rank');
+  });
+});
+
+describe('/apply', () => {
+  it('a member applies; the answers go to the review channel; accepting gives the starting rank', async () => {
+    const t = await start();
+    t.services.commands = await loadCommands();
+    const { services, fc, post, req, patches } = t;
+    await post('/groups', { action: 'add', group: String(DIV) });
+    await post(`/groups/${DIV}`, { action: 'apps-settings', open: '1', questions: 'Why do you want to join?\nHow many hours a week?', startRoleId: '52', channelId: '800000000000000001' });
+    expect((await services.divisions.get(DIV))?.applications).toMatchObject({ open: true, startRoleId: 52, questions: ['Why do you want to join?', 'How many hours a week?'] });
+    await services.links.linkVerified(IDS.staffUser, { id: 99, name: 'Pte_Target' }, 'manual');
+
+    const cmd = fakeInteraction({ commandName: 'apply', strings: { division: String(DIV) }, client: fc });
+    await handleInteraction(services, cmd.interaction as never);
+    const form = (cmd.replies.at(-1) as { toJSON(): { custom_id: string; components: unknown[] } }).toJSON();
+    expect(form.custom_id).toBe(`apply:form:${DIV}`);
+    expect(form.components).toHaveLength(2);
+    const sub = fakeModal({ customId: form.custom_id, fields: { q0: 'I like the Rifles', q1: '10' }, client: fc });
+    await handleInteraction(services, sub.interaction as never);
+    expect(replyText(sub.replies.at(-1))).toMatch(/application to \*\*Royal Rifles of Canada\*\* is in/);
+    const review = fc.sent.at(-1)!;
+    expect(review.channelId).toBe('800000000000000001');
+    expect(JSON.stringify((review.payload.embeds as { toJSON(): unknown }[])[0]!.toJSON())).toContain('I like the Rifles');
+    const [app] = await services.applications.list({ status: 'pending' });
+
+    // a second application while one waits is refused
+    const again = fakeInteraction({ commandName: 'apply', strings: { division: String(DIV) }, client: fc });
+    await handleInteraction(services, again.interaction as never);
+    expect(replyText(again.replies.at(-1))).toMatch(/already have an application/);
+
+    const accept = fakeButton({ customId: `apply:accept:${app!.id}`, userId: IDS.otherUser, client: fc });
+    await handleInteraction(services, accept.interaction as never);
+    expect(patches.at(-1)!.body).toEqual({ role: `groups/${DIV}/roles/52` });
+    expect((await services.applications.get(app!.id))?.status).toBe('accepted');
+    expect(String(fc.dms.at(-1)?.payload.content)).toMatch(/application to \*\*Royal Rifles of Canada\*\* was accepted/);
+    expect(await (await req(`/groups/${DIV}?tab=applications`)).text()).toContain('Accepted');
+  });
+});
+
+describe('activity', () => {
+  it('works out time played this week from daily checks, and the status from when they last played', async () => {
+    let clock = Date.parse('2026-11-01T12:00:00Z');
+    let play = 600;
+    const fake = {
+      config: { roblox: { armyGroupId: ARMY } },
+      logger: { warn: () => undefined },
+      divisions: { list: async () => [] },
+      groups: { listMembers: async () => ({ members: [{ userId: 5, roleId: 2 }] }) },
+      profiles: {
+        get: async () => ({ data: { service: { lastJoin: clock / 1000 - 2 * 86400, playtime: play, deployedTime: 100 }, training: { history: [{ t: clock / 1000 - 86400 }, { t: clock / 1000 - 40 * 86400 }] } } }),
+      },
+    };
+    const a = new ActivityTracker(fake as never, null, () => clock);
+    await a.refreshGroup(ARMY);
+    expect((await a.person(5)).week).toBeUndefined(); // no week-old check yet
+    clock += 8 * 86400_000;
+    play = 900;
+    await a.refreshGroup(ARMY);
+    const p = await a.person(5);
+    expect(p.week).toBe(300);
+    expect(p.row?.trainings30).toBe(1);
+    expect(statusOf(p.row, clock)).toBe('active');
+    expect(statusOf(p.row, clock + 10 * 86400_000)).toBe('quiet');
+    expect(statusOf(p.row, clock + 30 * 86400_000)).toBe('inactive');
+    expect((await a.group(ARMY)).members[0]).toMatchObject({ userId: 5, week: 300 });
+  });
+
+  it('the Activity tab lists members with their status', async () => {
+    const { req, services } = await start();
+    await services.activity.refreshGroup(ARMY);
+    const page = await (await req(`/groups/${ARMY}?tab=activity`)).text();
+    expect(page).toContain('Pte_Target');
+    expect(page).toContain('Inactive'); // last played a year ago
+    expect(page).toContain('Checked just now');
+    expect(await (await req('/members/99')).text()).toContain('trainings in 30 days');
   });
 });

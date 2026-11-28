@@ -21,6 +21,9 @@ async function main(): Promise<void> {
   }
   const logger = createLogger(config.log.level, config.log.pretty);
   const services = createServices(config, logger);
+  // point values and rank requirements from the dashboard (the game reads the same entry)
+  await services.serviceSettings.load();
+  const settingsTimer = setInterval(() => void services.serviceSettings.load(), 5 * 60_000).unref();
   services.commands = await loadCommands();
 
   // No privileged intents by default (member roles come with each interaction). AUTO_UPDATE_ON_JOIN
@@ -46,6 +49,8 @@ async function main(): Promise<void> {
   const shutdown = async (signal: string) => {
     logger.info({ signal }, 'shutting down');
     services.eventSync.stop();
+    clearInterval(settingsTimer);
+    await services.audit.flush();
     await dashboard?.close();
     await client.destroy();
     process.exit(0);

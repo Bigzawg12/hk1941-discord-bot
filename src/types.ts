@@ -17,8 +17,11 @@ import type { Tier } from './permissions/tiers.js';
 import type { PanelStore } from './posts/panelStore.js';
 import type { PostStore } from './posts/store.js';
 import type { AdminLogArchive } from './game/adminLogArchive.js';
+import type { ActivityTracker } from './game/activity.js';
+import type { ApplicationStore } from './game/applications.js';
 import type { DivisionStore } from './game/divisions.js';
 import type { PromotionLog, PromotionRequests } from './game/promotions.js';
+import type { ServiceSettingsStore } from './game/serviceSettings.js';
 import type { GlobalData } from './roblox/globalData.js';
 import type { GroupsClient } from './roblox/groups.js';
 import type { ProfileReader } from './roblox/profiles.js';
@@ -51,10 +54,16 @@ export interface Services {
   adminLog: AdminLogArchive;
   /** rank changes made through the bot */
   promotionLog: PromotionLog;
+  /** point values and rank requirements set on the dashboard */
+  serviceSettings: ServiceSettingsStore;
   /** promotion requests made with /nominate */
   promotionRequests: PromotionRequests;
   /** divisions (Roblox groups) shown on the dashboard, besides the army group */
   divisions: DivisionStore;
+  /** division applications (/apply) */
+  applications: ApplicationStore;
+  /** who is active in each group */
+  activity: ActivityTracker;
   /** filled in by the loader */
   commands: Map<string, Command>;
 }

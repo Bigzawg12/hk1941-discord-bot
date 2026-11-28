@@ -184,8 +184,10 @@ export interface RankChange {
   user: RobloxUser | null;
   from: UserRank;
   to: GroupRole;
-  /** their Discord roles and nickname were refreshed (they have a linked account) */
+  /** a Discord role or nickname actually changed */
   discordUpdated: boolean;
+  /** they have a linked Discord account (so their roles were checked) */
+  discordLinked: boolean;
 }
 
 /** Turn Roblox's refusal into something staff can act on. */
@@ -263,9 +265,9 @@ export async function changeRank(
       services.logger.warn({ err }, 'could not update Discord roles after a rank change');
       return [];
     });
-    discordUpdated = results.length > 0;
+    discordUpdated = results.some((x) => x.added.length > 0 || x.removed.length > 0 || !!x.nickname);
   }
-  return { user, from, to, discordUpdated };
+  return { user, from, to, discordUpdated, discordLinked: !!link };
 }
 
 // ---------- history ----------
@@ -440,4 +442,11 @@ export function describeBulk(r: BulkResult): string {
   ]
     .filter(Boolean)
     .join(' ');
+}
+
+/** One sentence on what happened in Discord after a rank change. */
+export function discordNote(c: Pick<RankChange, 'discordUpdated' | 'discordLinked'>): string {
+  if (c.discordUpdated) return 'Their Discord roles and nickname are updated.';
+  if (c.discordLinked) return 'Nothing changed in Discord: no rank bind matches this rank (add them under Servers → Rank binds, or /setup bind).';
+  return 'They have no linked Discord account, so no Discord roles were changed.';
 }

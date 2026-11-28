@@ -8,7 +8,7 @@ import {
 } from 'discord.js';
 import { COLOURS, ephemeral, esc, resolveRobloxTarget } from '../discord/helpers.js';
 import { standing } from '../game/points.js';
-import { assignable, changeRank, rankGuard } from '../game/promotions.js';
+import { assignable, changeRank, discordNote, rankGuard } from '../game/promotions.js';
 import { Tier } from '../permissions/tiers.js';
 import { profileUrl } from '../roblox/users.js';
 import { defineCommand, type CommandContext } from '../types.js';
@@ -92,13 +92,13 @@ export default defineCommand({
       return;
     }
     await interaction.deferUpdate();
-    const { user, to, discordUpdated } = await changeRank(services, {
+    const change = await changeRank(services, {
       client: interaction.client,
       userId: Number(userIdS),
       roleId: Number(roleIdS),
       actor: { robloxId: ctx.caller.robloxId, tier: ctx.caller.tier },
       audit: { actorId: interaction.user.id, actorName: `${interaction.user.username}${ctx.caller.robloxName ? ` / ${ctx.caller.robloxName}` : ''}`, guildId: interaction.guildId },
     });
-    await interaction.editReply({ content: `✅ ${esc(user?.name ?? userIdS ?? '')} is now **${esc(to.name)}**.${discordUpdated ? ' Their Discord roles are updated.' : ''} (In game it shows after they rejoin.)`, embeds: [], components: [] });
+    await interaction.editReply({ content: `✅ ${esc(change.user?.name ?? userIdS ?? '')} is now **${esc(change.to.name)}**. ${discordNote(change)} (In game it shows after they rejoin.)`, embeds: [], components: [] });
   },
 });

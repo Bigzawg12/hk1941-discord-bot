@@ -11,7 +11,7 @@ import {
 } from 'discord.js';
 import { COLOURS, ephemeral, esc, resolveRobloxTarget } from '../discord/helpers.js';
 import { standing } from '../game/points.js';
-import { assignable, changeRank, type PromotionRequest } from '../game/promotions.js';
+import { assignable, changeRank, discordNote, type PromotionRequest } from '../game/promotions.js';
 import { Tier, tierLabel } from '../permissions/tiers.js';
 import { field, modal, newToken } from '../posts/workflow.js';
 import { profileUrl } from '../roblox/users.js';
@@ -69,7 +69,7 @@ export async function decideRequest(
   if (inFlight.has(id)) throw new UserFacingError('Someone is deciding on this right now.');
   inFlight.add(id);
   try {
-    let changed: { discordUpdated: boolean } | null = null;
+    let changed: { discordUpdated: boolean; discordLinked: boolean } | null = null;
     if (d.approve) {
       changed = await changeRank(services, {
         groupId: r.groupId,
@@ -105,7 +105,7 @@ export async function decideRequest(
     }
     if (client) {
       const text = d.approve
-        ? `✅ Your request to promote ${r.userName} to ${r.toName} was approved by ${d.byName}.${changed?.discordUpdated ? ' Their Discord roles are updated.' : ''}`
+        ? `✅ Your request to promote ${r.userName} to ${r.toName} was approved by ${d.byName}.${changed ? ` ${discordNote(changed)}` : ''}`
         : `❌ Your request to promote ${r.userName} to ${r.toName} was not approved by ${d.byName}.${r.note ? `\nReason: ${r.note}` : ''}`;
       await client.users.send(r.byId, { content: text, allowedMentions: { parse: [] } }).catch(() => undefined);
     }

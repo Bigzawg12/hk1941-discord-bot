@@ -67,6 +67,9 @@ export function testServices(routes: Route[], envOver: Env = {}): { services: Se
     promotionLogFile: null,
     divisionsFile: null,
     promotionRequestsFile: null,
+    auditFile: null,
+    applicationsFile: null,
+    activityFile: null,
     sleep: async () => undefined,
   });
   return { services, calls };

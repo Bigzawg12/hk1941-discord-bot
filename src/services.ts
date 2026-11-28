@@ -10,16 +10,19 @@ import type { Logger } from './logger.js';
 import { PermissionResolver } from './permissions/resolver.js';
 import { JsonFilePanelStore, type PanelStore } from './posts/panelStore.js';
 import { JsonFilePostStore, type PostStore } from './posts/store.js';
-import { DataStoreReader } from './roblox/datastores.js';
+import { DataStoreReader, DataStoreWriter } from './roblox/datastores.js';
 import { GlobalData } from './roblox/globalData.js';
 import { GroupsClient } from './roblox/groups.js';
 import { RobloxHttp, type FetchLike } from './roblox/http.js';
 import { SortedMapReader } from './roblox/memoryStore.js';
 import { MessagingPublisher } from './roblox/messaging.js';
+import { ServiceSettingsStore } from './game/serviceSettings.js';
 import { ProfileReader } from './roblox/profiles.js';
 import { ServerDirectory } from './roblox/servers.js';
 import { UsersClient } from './roblox/users.js';
 import { AdminLogArchive } from './game/adminLogArchive.js';
+import { ActivityTracker } from './game/activity.js';
+import { ApplicationStore } from './game/applications.js';
 import { DivisionStore } from './game/divisions.js';
 import { PromotionLog, PromotionRequests } from './game/promotions.js';
 import { EventSync } from './sync/eventSync.js';
@@ -39,6 +42,12 @@ export interface ServiceOverrides {
   divisionsFile?: string | null;
   /** /nominate requests; null = memory only (tests) */
   promotionRequestsFile?: string | null;
+  /** the kept audit history; null = memory only (tests) */
+  auditFile?: string | null;
+  /** division applications; null = memory only (tests) */
+  applicationsFile?: string | null;
+  /** activity history; null = memory only (tests) */
+  activityFile?: string | null;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -90,7 +99,15 @@ export function createServices(config: BotConfig, logger: Logger, overrides: Ser
     ),
     promotionLog: new PromotionLog(overrides.promotionLogFile === undefined ? join(config.dataDir, 'promotions.json') : overrides.promotionLogFile),
     promotionRequests: new PromotionRequests(overrides.promotionRequestsFile === undefined ? join(config.dataDir, 'promotion-requests.json') : overrides.promotionRequestsFile),
+    applications: new ApplicationStore(overrides.applicationsFile === undefined ? join(config.dataDir, 'applications.json') : overrides.applicationsFile),
     divisions: new DivisionStore(overrides.divisionsFile === undefined ? join(config.dataDir, 'divisions.json') : overrides.divisionsFile),
+    serviceSettings: new ServiceSettingsStore({
+      global,
+      writer: new DataStoreWriter(openCloud, config.roblox.universeId),
+      publisher: new MessagingPublisher(openCloud, config.roblox.universeId),
+      storeName: config.roblox.globalStore,
+      logger,
+    }),
     bridge: new BridgeClient({
       publisher: new MessagingPublisher(openCloud, config.roblox.universeId),
       acks: sortedMaps,
@@ -109,13 +126,15 @@ export function createServices(config: BotConfig, logger: Logger, overrides: Ser
     }),
     links,
     permissions: new PermissionResolver(config, { links, groups, guilds, logger }),
-    audit: new AuditLog(logger, config.discord.auditChannelId, guilds),
+    audit: new AuditLog(logger, config.discord.auditChannelId, guilds, overrides.auditFile === undefined ? join(config.dataDir, 'audit.json') : overrides.auditFile),
     guilds,
     posts: overrides.postStore ?? new JsonFilePostStore(join(config.dataDir, 'posts.json'), overrides.now),
     panels: overrides.panelStore ?? new JsonFilePanelStore(join(config.dataDir, 'panels.json')),
     commands: new Map(),
     eventSync: undefined as unknown as EventSync, // set just below: it needs the finished services
+    activity: undefined as unknown as ActivityTracker, // set just below too
   };
   services.eventSync = new EventSync(services, nowSec);
+  services.activity = new ActivityTracker(services, overrides.activityFile === undefined ? join(config.dataDir, 'activity.json') : overrides.activityFile, overrides.now);
   return services;
 }

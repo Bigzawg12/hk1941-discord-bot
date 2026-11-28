@@ -1,14 +1,18 @@
 import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import type { AddressInfo } from 'node:net';
 import { ChannelType, type Client, type Guild } from 'discord.js';
 import { verifyPanel } from '../commands/verify.js';
 import { commandOf, type GameLogEntry } from '../game/adminLogArchive.js';
-import { CERT_BY_ID, MAX_STRIPES, MEDAL_BY_ID, RANKS } from '../game/gameConfig.js';
+import { CERT_BY_ID, MAX_STRIPES, MEDAL_BY_ID, POINTS, RANKS } from '../game/gameConfig.js';
+import { DEFAULT_POINTS, DEFAULT_RANKS, POINT_FIELDS, type ServiceSettings } from '../game/serviceSettings.js';
 import { computePoints, hours, standing } from '../game/points.js';
 import type { DivisionEntry } from '../game/divisions.js';
 import { decideRequest } from '../commands/nominate.js';
-import { assignable, bulkPromote, changeRank, describeBulk, nextRole, progressOf, rosterFor, type Roster } from '../game/promotions.js';
+import { ACTIVE_DAYS, QUIET_DAYS, statusOf, type ActivityStatus } from '../game/activity.js';
+import { canReview, decideApplication } from '../game/applications.js';
+import { assignable, bulkPromote, changeRank, describeBulk, discordNote, nextRole, progressOf, rosterFor, type Roster } from '../game/promotions.js';
 import type { GuildSettings, StaffTier } from '../guilds/settings.js';
 import { describeSync, NICKNAME_TOKENS, syncEverywhere } from '../linking/memberSync.js';
 import type { AccountLink } from '../linking/store.js';
@@ -28,11 +32,12 @@ import {
   type PanelDraft,
 } from '../posts/render.js';
 import type { PendingPost } from '../posts/store.js';
-import { decideFromDashboard, DEFAULT_APPROVER_TIER } from '../posts/workflow.js';
+import { approverTier, decideFromDashboard, DEFAULT_APPROVER_TIER } from '../posts/workflow.js';
 import type { GroupInfo, GroupMember, GroupRole } from '../roblox/groups.js';
 import type { FetchLike } from '../roblox/http.js';
 import { profileUrl } from '../roblox/users.js';
 import type { Services } from '../types.js';
+import { TtlCache } from '../util/cache.js';
 import { UserFacingError } from '../util/errors.js';
 import {
   ago,
@@ -53,7 +58,9 @@ import {
   type Option,
   type Tone,
 } from './html.js';
+import { AccessStore, checkAccess, Level, LEVEL_HINTS, LEVEL_NAMES, levelNeeded, type AccessCheck, type AccessSettings } from './access.js';
 import { discordMarkdown } from './markdown.js';
+import type { StoredAudit } from '../discord/audit.js';
 import { DiscordOAuth, OAuthError, randomState } from './oauth.js';
 import { sameToken, SessionStore, type Session } from './session.js';
 
@@ -72,8 +79,12 @@ export interface DashboardDeps {
   now?: () => number;
   /** how often to copy the in-game admin log (ms); 0 = only when the Game log page is opened */
   gameLogPollMs?: number;
+  /** how often to see whether the daily activity check is due (ms); 0 = never (tests) */
+  activityPollMs?: number;
   /** how long a Promotions page waits for a group scan before showing the last one (ms) */
   scanWaitMs?: number;
+  /** who may use the dashboard (null = memory only, for tests); default DATA_DIR/dashboard-access.json */
+  accessFile?: string | null;
 }
 
 interface Req {
@@ -81,6 +92,8 @@ interface Req {
   url: URL;
   session: Session;
   form: Record<string, string>;
+  /** filled in once they're signed in */
+  access?: AccessCheck;
 }
 
 class Redirect {
@@ -95,6 +108,8 @@ class Raw {
 }
 
 const MAX_BODY = 64 * 1024;
+/** how often a signed-in person's access level is worked out again */
+const ACCESS_RECHECK_MS = 5 * 60_000;
 /** The group's crest (assets/logo.png), shown in the sidebar, on the sign-in page and as the tab icon. */
 const LOGO: Buffer | null = (() => {
   try {
@@ -108,7 +123,7 @@ const startedAt = Date.now();
 /** Game log: read the game again when the page is opened and the copy is older than this. */
 const GAME_LOG_FRESH_MS = 60_000;
 /** Pages a sign-in may return to (never /favicon.ico and the like). */
-const RETURNABLE = /^\/(approvals|promotions|members(\/\d{1,19})?|groups(\/\d{1,15})?|game-log|servers(\/\d{15,25})?|panels(\/new|\/\d{15,25})?|links)?$/;
+const RETURNABLE = /^\/(approvals|promotions|members(\/\d{1,19})?|groups(\/\d{1,15})?|game-log|servers(\/\d{15,25})?|panels(\/new|\/\d{15,25})?|links|access|audit)?$/;
 
 function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
@@ -190,7 +205,81 @@ export function createDashboard(deps: DashboardDeps) {
     redirectUri: `${cfg.publicUrl}/auth/discord/callback`,
     fetch: deps.fetch ?? ((i, init) => fetch(i, init)),
   });
-  const isAdmin = (s: Session) => !!s.user && cfg.adminIds.includes(s.user.id);
+  const accessStore = new AccessStore(deps.accessFile === undefined ? join(services.config.dataDir, 'dashboard-access.json') : deps.accessFile);
+  /** Rank changes from the dashboard: owners aren't limited, everyone else only below their own army rank. */
+  const actorOf = (r: Req) => {
+    const a = r.access!;
+    return a.level >= Level.Owner ? { tier: Tier.Owner } : { tier: a.level >= Level.Admin ? Tier.Administrator : Tier.Moderator, robloxId: a.robloxId };
+  };
+  const can = (r: Req, level: Level) => (r.access?.level ?? 0) >= level;
+  /**
+   * Discord-server checks for everyone but owners: the same staff tier as the Discord commands need,
+   * worked out from their roles in that server (Administrator for settings and panels, the server's
+   * approver tier for posts). Cached a minute.
+   */
+  const guildTierCache = new TtlCache<string, number>(60_000, 2000);
+  async function guildTier(r: Req, guildId: string): Promise<number> {
+    if (can(r, Level.Owner)) return Tier.Owner;
+    const id = r.session.user!.id;
+    const key = `${id}:${guildId}`;
+    const hit = guildTierCache.get(key);
+    if (hit !== undefined) return hit;
+    let tier = 0;
+    const guild = deps.client()?.guilds.cache.get(guildId);
+    const member = guild && typeof guild.members?.fetch === 'function' ? await guild.members.fetch(id).catch(() => null) : null;
+    if (member) {
+      const roles = member.roles?.cache ? [...member.roles.cache.keys()] : [];
+      tier = (await services.permissions.resolve({ discordId: id, roleIds: roles, guildId }).catch(() => ({ tier: 0 }))).tier;
+    }
+    guildTierCache.set(key, tier);
+    return tier;
+  }
+  async function canInGuild(r: Req, guildId: string, need: number): Promise<boolean> {
+    return (await guildTier(r, guildId)) >= need;
+  }
+  async function needInGuild(r: Req, guildId: string, need: number, what: string): Promise<void> {
+    if (!(await canInGuild(r, guildId, need))) throw new UserFacingError(`${what} needs ${TIER_NAMES[need as StaffTier] ?? `tier ${need}`} (${need}) in that Discord server.`);
+  }
+  /** The bot's servers this person may manage (settings, panels). */
+  async function myGuilds(r: Req): Promise<Guild[]> {
+    const all = [...(deps.client()?.guilds.cache.values() ?? [])].sort((a, b) => a.name.localeCompare(b.name));
+    const ok = await Promise.all(all.map((g) => canInGuild(r, g.id, Tier.Administrator)));
+    return all.filter((_, i) => ok[i]);
+  }
+  /** Posts waiting that this person may decide. */
+  async function myPending(r: Req): Promise<PendingPost[]> {
+    const all = await pendingPosts().catch(() => [] as PendingPost[]);
+    const ok = await Promise.all(all.map(async (p) => canInGuild(r, p.guildId, await approverTier(services, p.guildId))));
+    return all.filter((_, i) => ok[i]);
+  }
+
+  /**
+   * Which groups someone may change ranks in. Admins and owners: all. Officers: a group whose
+   * "who can change ranks here" rank they hold in that group, or one an owner gave them by hand.
+   * (Their own rank there still limits what they can give.)
+   */
+  async function canManageGroup(r: Req, groupId: number): Promise<boolean> {
+    if (!can(r, Level.Officer)) return false;
+    if (can(r, Level.Admin)) return true;
+    const person = (await accessStore.get()).people[r.session.user!.id];
+    if (person?.groups?.includes(groupId)) return true;
+    const entry = await services.divisions.get(groupId);
+    if (!entry?.managerRank || !r.access?.robloxId) return false;
+    const mine = await services.groups.rankIn(groupId, r.access.robloxId).catch(() => null);
+    return (mine?.rank ?? 0) >= entry.managerRank;
+  }
+  async function needManage(r: Req, groupId: number): Promise<void> {
+    if (!(await canManageGroup(r, groupId))) throw new UserFacingError('You can’t change ranks in this group. An owner or admin sets who can, on the group’s Settings tab.');
+  }
+
+  /** Their level, worked out again every few minutes (ranks change). */
+  async function accessOf(s: Session): Promise<AccessCheck> {
+    const cached = s.access;
+    if (cached && now() - cached.at < ACCESS_RECHECK_MS) return cached;
+    const fresh = { ...(await checkAccess(services, accessStore, s.user!.id, cfg.adminIds)), at: now() };
+    s.access = fresh;
+    return fresh;
+  }
   const flash = (s: Session, kind: 'ok' | 'bad', text: string) => {
     s.flash = { kind, text };
   };
@@ -216,8 +305,9 @@ export function createDashboard(deps: DashboardDeps) {
   }
 
   async function page(r: Req, opts: { title: string; nav?: string; body: Html; refreshSec?: number }): Promise<string> {
-    const approvals = (await pendingPosts().catch(() => [])).length;
-    return layout({ ...opts, session: r.session, counts: { approvals }, path: r.url.pathname + r.url.search });
+    const level = r.access?.level ?? 0;
+    const approvals = level >= Level.Admin ? (await myPending(r)).length : 0;
+    return layout({ ...opts, session: r.session, counts: { approvals }, path: r.url.pathname + r.url.search, level });
   }
 
   /** Discord name and avatar; fetches at most `budget.n` users that aren't cached yet. */
@@ -263,7 +353,7 @@ export function createDashboard(deps: DashboardDeps) {
 
   // ---------- sign in ----------
 
-  function loginPage(s: Session, denied = false): string {
+  function loginPage(s: Session, denied: string | false = false): string {
     return layout({
       title: 'Sign in',
       session: s,
@@ -274,7 +364,7 @@ export function createDashboard(deps: DashboardDeps) {
         <p class="kicker">Staff dashboard</p>
         ${
           denied
-            ? html`<p class="flash bad">That Discord account isn't on the dashboard's admin list.</p>`
+            ? html`<p class="flash bad">That Discord account can't use the dashboard. ${denied}</p>`
             : html`<p class="muted">Sign in with your Discord account to continue.</p>`
         }
         <a class="btn" href="/auth/discord">Sign in with Discord</a>
@@ -289,7 +379,7 @@ export function createDashboard(deps: DashboardDeps) {
     const [servers, links, pending, log] = await Promise.all([
       services.servers.list().catch(() => ({ source: 'none' as const, servers: [], error: 'unavailable' })),
       services.links.all(),
-      pendingPosts(),
+      can(r, Level.Admin) ? myPending(r) : Promise.resolve([] as PendingPost[]),
       freshGameLog(),
     ]);
     const players = servers.servers.reduce((n, x) => n + x.players, 0);
@@ -315,14 +405,14 @@ export function createDashboard(deps: DashboardDeps) {
       body: html`${pageHead('Overview', html`${badge(c?.isReady() ? 'Bot online' : 'Bot connecting', c?.isReady() ? 'ok' : 'warn')} <span class="muted">· up ${uptime(Date.now() - startedAt)}</span>`)}
       <div class="stats">
         ${stat(null, 'game', 'ok', servers.servers.length, `live game server${servers.servers.length === 1 ? '' : 's'}`, ` · ${players} playing`)}
-        ${stat('/approvals', 'inbox', pending.length ? 'warn' : '', pending.length, 'waiting for approval')}
+        ${can(r, Level.Admin) ? stat('/approvals', 'inbox', pending.length ? 'warn' : '', pending.length, 'waiting for approval') : ''}
         ${stat('/game-log', 'log', 'info', log.filter((e) => e.t >= dayAgo).length, 'game commands today')}
-        ${stat('/links', 'link', '', links.length, 'linked accounts')}
-        ${stat('/servers', 'server', '', c?.guilds.cache.size ?? '–', 'Discord servers')}
+        ${stat(can(r, Level.Admin) ? '/links' : null, 'link', '', links.length, 'linked accounts')}
+        ${stat(can(r, Level.Admin) ? '/servers' : null, 'server', '', c?.guilds.cache.size ?? '–', 'Discord servers')}
       </div>
       <div class="grid-2">
         <div class="stack">
-          ${card(
+          ${!can(r, Level.Admin) ? '' : card(
             'Waiting for approval',
             pending.length
               ? html`<ul class="list">${pending.slice(0, 5).map(
@@ -382,7 +472,8 @@ export function createDashboard(deps: DashboardDeps) {
 
   async function approvalsPage(r: Req): Promise<string> {
     const c = deps.client();
-    const all = await services.posts.list();
+    const mine = new Set(await Promise.all((await services.posts.list()).map(async (p) => ((await canInGuild(r, p.guildId, await approverTier(services, p.guildId))) ? p.id : ''))));
+    const all = (await services.posts.list()).filter((p) => mine.has(p.id));
     const pending = all.filter((p) => p.status === 'pending');
     const decided = all.filter((p) => p.status !== 'pending').sort((a, b) => (b.decidedAt ?? 0) - (a.decidedAt ?? 0)).slice(0, 25);
     const budget = { n: 10 };
@@ -435,6 +526,8 @@ export function createDashboard(deps: DashboardDeps) {
     if (r.form.action !== 'decide') throw new UserFacingError('Unknown action.');
     const approve = r.form.decision === 'approve';
     const by = r.session.user!;
+    const target = await services.posts.get(r.form.id ?? '');
+    if (target) await needInGuild(r, target.guildId, await approverTier(services, target.guildId), 'Approving posts');
     const post = await decideFromDashboard(services, client(), r.form.id ?? '', { approve, by: by.globalName ?? by.username, byDiscordId: by.id, reason: r.form.reason });
     flash(r.session, 'ok', approve ? `Approved and posted${post.postUrl ? `: ${post.postUrl}` : '.'}` : 'Rejected. The author has been told.');
   }
@@ -582,8 +675,9 @@ export function createDashboard(deps: DashboardDeps) {
   // ---------- servers ----------
 
   async function serversPage(r: Req): Promise<string> {
-    const guilds = [...client().guilds.cache.values()].sort((a, b) => a.name.localeCompare(b.name));
-    const pending = await pendingPosts();
+    client();
+    const guilds = await myGuilds(r);
+    const pending = await myPending(r);
     const cards = await Promise.all(
       guilds.map(async (g) => {
         const s = await services.guilds.get(g.id);
@@ -771,6 +865,7 @@ export function createDashboard(deps: DashboardDeps) {
     ['progress', 'Progress by rank'],
     ['requests', 'Requests'],
     ['history', 'History'],
+    ['settings', 'Points & ranks'],
   ] as const;
   type PromoTab = (typeof PROMO_TABS)[number][0];
   /** most promotions in one go */
@@ -813,7 +908,8 @@ export function createDashboard(deps: DashboardDeps) {
 
   async function promotionsPage(r: Req): Promise<string> {
     const tabParam = r.url.searchParams.get('tab');
-    const tab: PromoTab = PROMO_TABS.some(([k]) => k === tabParam) ? (tabParam as PromoTab) : 'queue';
+    const tabs = PROMO_TABS.filter(([k]) => k !== 'settings' || can(r, Level.Admin));
+    const tab: PromoTab = tabs.some(([k]) => k === tabParam) ? (tabParam as PromoTab) : 'queue';
     const group = services.config.roblox.armyGroupId;
     const roles = await services.groups.listRoles(group).catch(() => [] as GroupRole[]);
     const roleAt = (rank: number) => roles.find((x) => x.rank === rank);
@@ -823,7 +919,40 @@ export function createDashboard(deps: DashboardDeps) {
     let refresh = false;
     const waiting = (await services.promotionRequests.list({ status: 'pending' })).length;
 
-    if (tab === 'requests') {
+    if (tab === 'settings') {
+      const st = services.serviceSettings;
+      const cur = st.current;
+      const num = (name: string, value: number, min: number, max: number) =>
+        html`<input class="num" type="number" name="${name}" id="${name}" value="${value}" min="${min}" max="${max}" step="1" required>`;
+      content = html`<form method="post" action="/promotions">${csrfField(r.session)}
+        ${card(
+          'How points are earned',
+          html`<div class="table-wrap"><table><thead><tr><th>What</th><th>Points</th><th>Game default</th></tr></thead><tbody>
+            ${POINT_FIELDS.map(
+              (f) => html`<tr><td><label for="p_${f.key}">${f.label}</label><br><small class="muted">${f.hint}</small></td>
+                <td>${num(`p_${f.key}`, POINTS[f.key], f.min ?? 0, f.max)}</td>
+                <td class="muted">${DEFAULT_POINTS[f.key]}${POINTS[f.key] !== DEFAULT_POINTS[f.key] ? html` ${badge('changed', 'accent')}` : ''}</td></tr>`,
+            )}</tbody></table></div>`,
+          { flush: true },
+        )}
+        ${card(
+          'Requirements for each rank',
+          html`<div class="table-wrap"><table><thead><tr><th>From</th><th>To</th><th>Points needed</th><th>Trainings needed</th><th>Game default</th></tr></thead><tbody>
+            ${LADDER.map((rank) => {
+              const req = RANKS[rank]!;
+              const def = DEFAULT_RANKS[rank]!;
+              const changed = req.points !== def.points || req.trainings !== def.trainings;
+              return html`<tr><td>${roleAt(rank)?.name ?? `Rank ${rank}`}</td><td><b>${roleAt(req.nextRank)?.name ?? req.next}</b></td>
+                <td>${num(`r_${rank}_points`, req.points, 0, 10_000_000)}</td><td>${num(`r_${rank}_trainings`, req.trainings, 0, 100_000)}</td>
+                <td class="muted nowrap">${def.points} pts · ${def.trainings} trainings${changed ? html` ${badge('changed', 'accent')}` : ''}</td></tr>`;
+            })}</tbody></table></div>`,
+          { flush: true },
+        )}
+        <div class="btn-row"><button name="action" value="settings">Save and apply</button><button class="secondary" name="action" value="settings-reset">Reset to the game’s defaults</button>
+        <span class="muted">${cur?.t ? `Last changed by ${cur.by ?? 'someone'}, ${ago(now() - cur.t)}.` : 'Using the game’s defaults.'}${st.lastError ? html` ${badge(`Couldn't read the saved settings: ${st.lastError.slice(0, 60)}`, 'bad')}` : ''}</span></div>
+        <p class="hint">Points are worked out from each soldier’s record, so a change re-scores everyone straight away: in game (live servers within seconds), on /record and here. Officer ranks stay by selection.</p>
+      </form>`;
+    } else if (tab === 'requests') {
       const all = await services.promotionRequests.list();
       const pending = all.filter((x) => x.status === 'pending');
       const decided = all.filter((x) => x.status !== 'pending').slice(0, 25);
@@ -835,9 +964,9 @@ export function createDashboard(deps: DashboardDeps) {
           <td>${faceHtml(await face(q.byId, budget), q.byName)}</td>
           <td class="wrap">${q.reason}</td>
           <td class="nowrap">${ago(now() - q.createdAt)}</td>
-          <td><form method="post" action="/promotions" class="inline-rank">${csrfField(r.session)}<input type="hidden" name="action" value="decide"><input type="hidden" name="id" value="${q.id}">
+          <td>${!can(r, Level.Admin) ? '' : html`<form method="post" action="/promotions" class="inline-rank">${csrfField(r.session)}<input type="hidden" name="action" value="decide"><input type="hidden" name="id" value="${q.id}">
             <input name="note" maxlength="300" placeholder="Note (optional)" aria-label="Note">
-            <button class="ok sm" name="decision" value="approve">Approve</button><button class="danger sm" name="decision" value="reject">Reject</button></form></td></tr>`),
+            <button class="ok sm" name="decision" value="approve">Approve</button><button class="danger sm" name="decision" value="reject">Reject</button></form>`}</td></tr>`),
       );
       content = html`${card(
         null,
@@ -909,6 +1038,7 @@ export function createDashboard(deps: DashboardDeps) {
       const s = await rosterNow(null);
       status = scanStatus(null, s);
       refresh = s.updating && !s.roster;
+      const manageArmy = await canManageGroup(r, group);
       const ready = (s.roster?.entries ?? []).filter((e) => e.eligible && e.next).sort((a, b) => a.rank - b.rank || b.points - a.points);
       const who = await people(ready.map((e) => e.userId));
       const links = await services.links.all();
@@ -918,12 +1048,12 @@ export function createDashboard(deps: DashboardDeps) {
         ready.map(async (e) => {
           const to = nextRole(roles, e.rank);
           const l = linkOf.get(e.userId);
-          return html`<tr><td class="pick">${to ? html`<input type="checkbox" name="pick_${e.userId}" value="${e.roleId}:${to.id}" aria-label="Pick ${e.userId}">` : ''}</td><td>${who(e.userId)}</td>
+          return html`<tr><td class="pick">${to && can(r, Level.Admin) ? html`<input type="checkbox" name="pick_${e.userId}" value="${e.roleId}:${to.id}" aria-label="Pick ${e.userId}">` : ''}</td><td>${who(e.userId)}</td>
             <td class="nowrap">${e.roleName} → <b>${to?.name ?? e.next!.next}</b></td>
             <td class="nowrap">${e.points} <small class="muted">/ ${e.next!.points}</small></td>
             <td class="nowrap">${e.trainings} <small class="muted">/ ${e.next!.trainings}</small></td>
             <td>${l ? faceHtml(await face(l.discordId, budget)) : badge('Not linked', 'muted')}</td>
-            <td class="nowrap right">${to ? html`<a class="btn sm secondary" href="/members/${e.userId}?promote=${to.id}">Review & promote</a>` : ''}</td></tr>`;
+            <td class="nowrap right">${to && manageArmy ? html`<a class="btn sm secondary" href="/members/${e.userId}?promote=${to.id}">Review & promote</a>` : html`<a class="btn sm ghost" href="/members/${e.userId}">Open</a>`}</td></tr>`;
         }),
       );
       content = card(
@@ -931,7 +1061,7 @@ export function createDashboard(deps: DashboardDeps) {
         ready.length
           ? html`<form method="post" action="/promotions">${csrfField(r.session)}<input type="hidden" name="action" value="bulk">
             <div class="table-wrap"><table><thead><tr><th class="pick"></th><th>Member</th><th>Promotion</th><th>Points</th><th>Trainings</th><th>Discord</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
-            <div class="pager"><span class="muted">${ready.length} ready · tick people, then promote them all at once (up to ${BULK_MAX}).</span><span class="btn-row"><input name="reason" maxlength="200" placeholder="Reason (optional)" aria-label="Reason" class="bulk-reason"><button>Promote ticked</button></span></div></form>`
+            ${can(r, Level.Admin) ? html`<div class="pager"><span class="muted">${ready.length} ready · tick people, then promote them all at once (up to ${BULK_MAX}).</span><span class="btn-row"><input name="reason" maxlength="200" placeholder="Reason (optional)" aria-label="Reason" class="bulk-reason"><button>Promote ticked</button></span></div>` : ''}</form>`
           : s.roster
             ? empty('Nobody is ready right now', 'Members show up here once they have the points and trainings for their next rank.')
             : empty('Checking the group…', 'Reading everyone’s service record. This page refreshes by itself.'),
@@ -945,11 +1075,11 @@ export function createDashboard(deps: DashboardDeps) {
       refreshSec: refresh ? 5 : undefined,
       body: html`${pageHead(
         'Promotions',
-        html`Points-ladder ranks in the army group. Officer ranks are by selection: change those from a member’s page. ${tab === 'history' || tab === 'requests' ? '' : status}`,
+        html`Points-ladder ranks in the army group. Officer ranks are by selection: change those from a member’s page. ${tab === 'history' || tab === 'requests' || tab === 'settings' ? '' : status}`,
         html`<form method="get" action="/members" class="search-inline"><input name="q" placeholder="Roblox name or ID" aria-label="Find a member" required><button class="secondary">Find</button></form>
-        ${tab === 'history' || tab === 'requests' ? '' : html`<form method="post" action="/promotions">${csrfField(r.session)}<input type="hidden" name="action" value="refresh"><input type="hidden" name="back" value="${r.url.pathname + r.url.search}"><input type="hidden" name="rank" value="${scanFor ?? ''}"><button class="secondary">Check again</button></form>`}`,
+        ${tab === 'history' || tab === 'requests' || tab === 'settings' ? '' : html`<form method="post" action="/promotions">${csrfField(r.session)}<input type="hidden" name="action" value="refresh"><input type="hidden" name="back" value="${r.url.pathname + r.url.search}"><input type="hidden" name="rank" value="${scanFor ?? ''}"><button class="secondary">Check again</button></form>`}`,
       )}
-      <nav class="tabs" aria-label="Promotions">${PROMO_TABS.map(([k, label]) => html`<a href="/promotions?tab=${k}"${k === tab ? new Html(' aria-current="page"') : ''}>${label}${k === 'requests' && waiting ? html` <span class="count">${waiting}</span>` : ''}</a>`)}</nav>
+      <nav class="tabs" aria-label="Promotions">${tabs.map(([k, label]) => html`<a href="/promotions?tab=${k}"${k === tab ? new Html(' aria-current="page"') : ''}>${label}${k === 'requests' && waiting ? html` <span class="count">${waiting}</span>` : ''}</a>`)}</nav>
       ${content}`,
     });
   }
@@ -957,9 +1087,34 @@ export function createDashboard(deps: DashboardDeps) {
   async function promotionsAction(r: Req): Promise<Redirect> {
     const by = r.session.user!;
     const byName = by.globalName ?? by.username;
+    if (r.form.action === 'settings' || r.form.action === 'settings-reset') {
+      let next: ServiceSettings = { v: 1 };
+      if (r.form.action === 'settings') {
+        const points: Record<string, number> = {};
+        for (const f of POINT_FIELDS) {
+          const v = Number(r.form[`p_${f.key}`]);
+          if (!Number.isInteger(v) || v < (f.min ?? 0) || v > f.max) throw new UserFacingError(`${f.label}: use a whole number from ${f.min ?? 0} to ${f.max}.`);
+          if (v !== DEFAULT_POINTS[f.key]) points[f.key] = v;
+        }
+        const ranks: Record<string, { points: number; trainings: number }> = {};
+        for (const rank of LADDER) {
+          const p = Number(r.form[`r_${rank}_points`]);
+          const t = Number(r.form[`r_${rank}_trainings`]);
+          if (!Number.isInteger(p) || p < 0 || !Number.isInteger(t) || t < 0) throw new UserFacingError(`Rank ${rank}: points and trainings are whole numbers, 0 or more.`);
+          const def = DEFAULT_RANKS[rank]!;
+          if (p !== def.points || t !== def.trainings) ranks[String(rank)] = { points: p, trainings: t };
+        }
+        next = { v: 1, points, ranks };
+      }
+      await services.serviceSettings.save(next, byName);
+      rosterFor(services).forget();
+      await audit(r, r.form.action === 'settings' ? 'Point settings changed' : 'Point settings reset', JSON.stringify({ points: next.points ?? {}, ranks: next.ranks ?? {} }).slice(0, 900));
+      flash(r.session, 'ok', r.form.action === 'settings' ? 'Saved. Live game servers use the new values within seconds.' : 'Back to the game’s defaults.');
+      return new Redirect('/promotions?tab=settings');
+    }
     if (r.form.action === 'decide') {
       const approve = r.form.decision === 'approve';
-      const q = await decideRequest(services, deps.client(), r.form.id ?? '', { approve, byName, byDiscordId: by.id, tier: Tier.Owner, note: r.form.note, dashboard: true });
+      const q = await decideRequest(services, deps.client(), r.form.id ?? '', { approve, byName, byDiscordId: by.id, tier: actorOf(r).tier, robloxId: r.access!.robloxId, note: r.form.note, dashboard: true });
       flash(r.session, 'ok', approve ? `Approved: ${q.userName} is now ${q.toName}.` : `Rejected. ${q.byName} has been told.`);
       return new Redirect('/promotions?tab=requests');
     }
@@ -971,7 +1126,7 @@ export function createDashboard(deps: DashboardDeps) {
       if (!picks.length) throw new UserFacingError('Tick at least one person.');
       if (picks.length > BULK_MAX) throw new UserFacingError(`At most ${BULK_MAX} at once.`);
       const results = await promoteMany(picks, {
-        actor: { tier: Tier.Owner },
+        actor: actorOf(r),
         audit: { actorId: by.id, actorName: `${byName} (dashboard)` },
         reason: r.form.reason,
         client: deps.client(),
@@ -1063,7 +1218,9 @@ export function createDashboard(deps: DashboardDeps) {
     // promotion
     const options = assignable(roles).map((x) => ({ value: String(x.id), label: `${x.rank} · ${x.name}` }));
     const pick = proposed ?? to;
-    const promoForm = rank?.rank
+    const promoForm = !(await canManageGroup(r, group))
+      ? ''
+      : rank?.rank
       ? html`<form method="post" action="/members/${id}" class="row">${csrfField(r.session)}<input type="hidden" name="action" value="rank"><input type="hidden" name="expectRoleId" value="${rank.roleId}">
           ${field('New rank', 'roleId', select('roleId', options, pick ? String(pick.id) : undefined, { none: null }))}
           ${field('Reason (for the audit log)', 'reason', html`<input id="reason" name="reason" maxlength="200" placeholder="Optional">`)}
@@ -1095,6 +1252,7 @@ export function createDashboard(deps: DashboardDeps) {
     }
 
     const pts = computePoints(d);
+    const actv = await services.activity.person(id);
     const s = d.service;
     const medals = Object.entries(d.medals.a).map(([mid, a]) => ({ m: MEDAL_BY_ID.get(mid), mid, a })).sort((x, y) => (x.m ? 0 : 1) - (y.m ? 0 : 1));
     const quals = Object.entries(d.medals.q).map(([cid, q]) => ({ c: CERT_BY_ID.get(cid), cid, q }));
@@ -1153,6 +1311,7 @@ export function createDashboard(deps: DashboardDeps) {
         <dt>Captures</dt><dd>${s.captures}</dd><dt>Events</dt><dd>${s.events}</dd>
         <dt>Trainings</dt><dd>${d.training.attended} attended · ${d.training.passed} passed · ${d.training.failed} failed · ${d.training.hosted} hosted</dd>
         <dt>Arrests made</dt><dd>${d.mp.made}</dd>
+        ${actv.row ? html`<dt>Recently</dt><dd>${actv.week !== undefined ? `${hours(actv.week)} played this week` : 'Weekly time fills in after a week of daily checks'}${actv.month !== undefined ? ` · ${hours(actv.month)} this month` : ''} · ${actv.row.trainings30} trainings in 30 days ${badge(({ active: 'Active', quiet: 'Quiet', inactive: 'Inactive', none: 'No record' } as const)[statusOf(actv.row, now())], ({ active: 'ok', quiet: 'warn', inactive: 'bad', none: 'muted' } as const)[statusOf(actv.row, now())])}</dd>` : ''}
       </dl>`,
     );
 
@@ -1189,13 +1348,14 @@ export function createDashboard(deps: DashboardDeps) {
     if (!(await services.divisions.list()).some((e) => e.groupId !== army)) return '';
     const views = (await groupViews()).filter((g) => g.groupId !== army);
     const theirs = await services.groups.userRanks(id).catch(() => []);
+    const manage = new Map(await Promise.all(views.map(async (g) => [g.groupId, await canManageGroup(r, g.groupId)] as const)));
     const rows = await Promise.all(
       views.map(async (g) => {
         const mine = theirs.find((x) => x.groupId === g.groupId);
         const roles = assignable(await services.groups.listRoles(g.groupId).catch(() => [] as GroupRole[]));
         return html`<li><span class="grow"><a class="strong" href="/groups/${g.groupId}">${g.name}</a><br><small class="muted">${mine?.rank ? `${mine.roleName} (rank ${mine.rank})` : 'Not a member'}</small></span>
           ${
-            mine?.rank && roles.length
+            mine?.rank && roles.length && manage.get(g.groupId)
               ? html`<form method="post" action="/groups/${g.groupId}" class="inline-rank">${csrfField(r.session)}<input type="hidden" name="action" value="rank"><input type="hidden" name="userId" value="${id}"><input type="hidden" name="expectRoleId" value="${mine.roleId}"><input type="hidden" name="back" value="/members/${id}">
                 ${select('roleId', roles.map((x) => ({ value: String(x.id), label: `${x.rank} · ${x.name}` })), String(mine.roleId), { none: null, id: `g${g.groupId}` })}<button class="secondary sm">Set</button></form>`
               : ''
@@ -1207,17 +1367,18 @@ export function createDashboard(deps: DashboardDeps) {
 
   async function memberAction(r: Req, id: number): Promise<void> {
     if (r.form.action !== 'rank') throw new UserFacingError('Unknown action.');
+    await needManage(r, services.config.roblox.armyGroupId);
     const by = r.session.user!;
-    const { user, from, to, discordUpdated } = await changeRank(services, {
+    const change = await changeRank(services, {
       client: deps.client(),
       userId: id,
       roleId: Number(r.form.roleId),
       expectRoleId: r.form.expectRoleId ? Number(r.form.expectRoleId) : undefined,
-      actor: { tier: Tier.Owner }, // dashboard admins are the owners
+      actor: actorOf(r),
       audit: { actorId: by.id, actorName: `${by.globalName ?? by.username} (dashboard)` },
       reason: r.form.reason,
     });
-    flash(r.session, 'ok', `${user?.name ?? id} is now ${to.name} (was ${from.roleName}).${discordUpdated ? ' Discord roles updated.' : ''} In game it shows after they rejoin.`);
+    flash(r.session, 'ok', `${change.user?.name ?? id} is now ${change.to.name} (was ${change.from.roleName}). ${discordNote(change)} In game it shows after they rejoin.`);
   }
 
   // ---------- groups (army + divisions) ----------
@@ -1237,6 +1398,8 @@ export function createDashboard(deps: DashboardDeps) {
   const GROUP_TABS = [
     ['members', 'Members'],
     ['ranks', 'Ranks'],
+    ['activity', 'Activity'],
+    ['applications', 'Applications'],
     ['settings', 'Settings'],
   ] as const;
   type GroupTab = (typeof GROUP_TABS)[number][0];
@@ -1262,38 +1425,60 @@ export function createDashboard(deps: DashboardDeps) {
   const groupKind = (g: GroupView) => (g.isMain ? 'Main group' : g.isArmy ? 'Army' : 'Division');
   const groupIcon = (g: GroupView, size = 44) => (g.icon ? html`<img src="${g.icon}" alt="" width="${size}" height="${size}">` : html`<span class="server-ph">${initials(g.name)}</span>`);
 
-  function groupLinks(g: GroupView): Html {
+  function groupLinks(g: GroupView, admin = false): Html {
     const guild = g.entry?.guildId ? deps.client()?.guilds.cache.get(g.entry.guildId) : undefined;
     return html`<span class="btn-row">
       <a class="btn sm secondary" href="${robloxGroupUrl(g.groupId)}" target="_blank" rel="noreferrer noopener">Roblox group ${icon('external', 'ic sm')}</a>
       ${g.entry?.discordInvite ? html`<a class="btn sm secondary" href="${g.entry.discordInvite}" target="_blank" rel="noreferrer noopener">Discord invite ${icon('external', 'ic sm')}</a>` : ''}
-      ${guild ? html`<a class="btn sm ghost" href="/servers/${guild.id}">${guild.name}</a>` : ''}
+      ${guild ? (admin ? html`<a class="btn sm ghost" href="/servers/${guild.id}">${guild.name}</a>` : html`<span class="muted">${guild.name}</span>`) : ''}
     </span>`;
   }
 
   async function groupsPage(r: Req): Promise<string> {
     const views = await groupViews();
-    const cards = views.map(
-      (g) => html`<section class="card server-card">
-        <div class="server-top">${groupIcon(g)}<div><h2><a class="plain" href="/groups/${g.groupId}">${g.name}</a></h2>
-          <span class="muted">${badge(groupKind(g), g.isArmy || g.isMain ? 'accent' : 'muted')} ${g.info ? `${g.info.memberCount.toLocaleString('en-GB')} members` : ''}</span></div></div>
-        ${g.error ? html`<p class="flash bad">Couldn't read this group: ${g.error.slice(0, 120)}</p>` : ''}
-        <div class="btn-row"><a class="btn" href="/groups/${g.groupId}">Open</a>${groupLinks(g)}</div>
-      </section>`,
-    );
+    const admin = can(r, Level.Admin);
+    const top = views.filter((g) => g.isMain || g.isArmy).sort((a, b) => Number(b.isMain) - Number(a.isMain));
+    const divisions = views.filter((g) => !g.isMain && !g.isArmy).sort((a, b) => a.name.localeCompare(b.name));
+    const total = (list: GroupView[]) => list.reduce((n, g) => n + (g.info?.memberCount ?? 0), 0);
+    const outLinks = (g: GroupView) => {
+      const guild = g.entry?.guildId ? deps.client()?.guilds.cache.get(g.entry.guildId) : undefined;
+      return html`<span class="tile-links">
+        <a href="${robloxGroupUrl(g.groupId)}" target="_blank" rel="noreferrer noopener">Roblox ${icon('external', 'ic sm')}</a>
+        ${g.entry?.discordInvite ? html`<a href="${g.entry.discordInvite}" target="_blank" rel="noreferrer noopener">Discord ${icon('external', 'ic sm')}</a>` : ''}
+        ${guild && admin ? html`<a href="/servers/${guild.id}">Server settings</a>` : ''}
+      </span>`;
+    };
+    const feature = (g: GroupView) => html`<section class="card group-feature">
+      <a class="group-feature-main" href="/groups/${g.groupId}">${groupIcon(g, 64)}
+        <span><span class="group-name">${g.name}</span>
+        <span class="group-meta">${badge(groupKind(g), 'accent')} ${g.info ? html`<b>${g.info.memberCount.toLocaleString('en-GB')}</b> members` : ''}</span>
+        ${g.info?.description ? html`<span class="group-desc">${g.info.description.split('\n')[0]!.slice(0, 140)}</span>` : ''}</span></a>
+      ${g.error ? html`<p class="flash bad">Couldn't read this group: ${g.error.slice(0, 120)}</p>` : ''}
+      ${outLinks(g)}
+    </section>`;
+    const tile = (g: GroupView) => html`<section class="group-tile">
+      <a class="group-tile-main" href="/groups/${g.groupId}">${groupIcon(g, 44)}
+        <span><span class="group-name">${g.name}</span><span class="group-meta">${g.info ? `${g.info.memberCount.toLocaleString('en-GB')} members` : g.error ? 'Couldn’t read this group' : ''}</span></span>
+        ${icon('arrow', 'ic tile-arrow')}</a>
+      ${outLinks(g)}
+    </section>`;
     return page(r, {
       title: 'Groups',
       nav: 'groups',
-      body: html`${pageHead('Groups', 'The army group and your divisions. Open one to see its members, change ranks, and find its Roblox group and Discord.')}
-      <div class="grid">${cards}</div>
-      ${card(
-        'Add a division',
-        html`<form method="post" action="/groups" class="row">${csrfField(r.session)}<input type="hidden" name="action" value="add">
+      body: html`${pageHead('Groups', 'The main group, the army and the divisions. Open one to see its members and ranks, change ranks, and find its Roblox group and Discord.')}
+      <div class="group-features">${top.map(feature)}</div>
+      <div class="section-head"><h2>Divisions</h2><span class="muted">${divisions.length} ${divisions.length === 1 ? 'division' : 'divisions'}${divisions.length ? ` · ${total(divisions).toLocaleString('en-GB')} members` : ''}</span></div>
+      ${divisions.length ? html`<div class="group-tiles">${divisions.map(tile)}</div>` : card(null, empty('No divisions yet', admin ? 'Add one below with its Roblox group link.' : 'An admin can add them.'))}
+      ${
+        !admin
+          ? ''
+          : html`<details class="card add-group"${divisions.length ? '' : new Html(' open')}><summary>Add a division</summary>
+        <form method="post" action="/groups" class="row">${csrfField(r.session)}<input type="hidden" name="action" value="add">
           ${field('Roblox group link or ID', 'group', html`<input id="group" name="group" required placeholder="https://www.roblox.com/groups/…">`)}
           ${field('Short name (optional)', 'label', html`<input id="label" name="label" maxlength="60" placeholder="e.g. Royal Rifles">`)}
           <button>Add group</button></form>
-          <p class="hint">To change ranks in a division, the Roblox account that owns the bot’s Open Cloud key must be in that group with a rank allowed to manage lower ranks. The same key works for every group that account is in.</p>`,
-      )}`,
+          <p class="hint">To change ranks in a division, the Roblox account that owns the bot’s Open Cloud key must be in that group with a rank allowed to manage lower ranks. The same key works for every group that account is in.</p></details>`
+      }`,
     });
   }
 
@@ -1301,13 +1486,114 @@ export function createDashboard(deps: DashboardDeps) {
     const [g] = await groupViews(groupId);
     if (!g) throw new NotFound();
     const tabParam = r.url.searchParams.get('tab');
-    const tab: GroupTab = GROUP_TABS.some(([k]) => k === tabParam) ? (tabParam as GroupTab) : 'members';
+    const groupTabs = GROUP_TABS.filter(([k]) => k !== 'settings' || can(r, Level.Admin));
+    const tab: GroupTab = groupTabs.some(([k]) => k === tabParam) ? (tabParam as GroupTab) : 'members';
     const roles = await services.groups.listRoles(groupId).catch(() => [] as GroupRole[]);
     const roleName = (id: number) => roles.find((x) => x.id === id)?.name ?? `Role ${id}`;
     const give = assignable(roles);
+    const manageHere = await canManageGroup(r, groupId);
     let content: Html;
+    let refresh = false;
 
-    if (tab === 'ranks') {
+    if (tab === 'activity') {
+      const act = await services.activity.group(groupId);
+      const running = services.activity.isRunning(groupId);
+      const statusWant = r.url.searchParams.get('status') ?? '';
+      const STATUS: Record<ActivityStatus, [string, Tone]> = { active: ['Active', 'ok'], quiet: ['Quiet', 'warn'], inactive: ['Inactive', 'bad'], none: ['No record', 'muted'] };
+      const withStatus = act.members.map((m) => ({ ...m, status: statusOf(m.row, now()) }));
+      const counts = { active: 0, quiet: 0, inactive: 0, none: 0 } as Record<ActivityStatus, number>;
+      for (const m of withStatus) counts[m.status]++;
+      const order: Record<ActivityStatus, number> = { inactive: 0, quiet: 1, none: 2, active: 3 };
+      const rows = withStatus
+        .filter((m) => !statusWant || m.status === statusWant)
+        .sort((a, b) => order[a.status] - order[b.status] || (a.row?.lastJoin ?? 0) - (b.row?.lastJoin ?? 0));
+      const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+      const pageNo = Math.min(pages, Math.max(1, Number(r.url.searchParams.get('page')) || 1));
+      const shown = rows.slice((pageNo - 1) * PAGE_SIZE, pageNo * PAGE_SIZE);
+      const who = await people(shown.map((m) => m.userId));
+      const hrs = (min?: number) => (min === undefined ? html`<span class="muted" title="Fills in once the bot has a week (or month) of daily checks">–</span>` : hours(min));
+      const qs = (st: string, p?: number) => `/groups/${groupId}?tab=activity${st ? `&status=${st}` : ''}${p && p > 1 ? `&page=${p}` : ''}`;
+      const chips = html`<nav class="chips" aria-label="Status"><a href="${qs('')}"${!statusWant ? new Html(' aria-current="page"') : ''}>Everyone <small>${act.members.length}</small></a>${(['inactive', 'quiet', 'active', 'none'] as const).map((k) => html`<a href="${qs(k)}"${statusWant === k ? new Html(' aria-current="page"') : ''}>${STATUS[k][0]} <small>${counts[k]}</small></a>`)}</nav>`;
+      refresh = running && !act.checkedAt;
+      content = html`<div class="activity-head"><span class="muted">${running ? 'Checking everyone’s records now…' : act.checkedAt ? `Checked ${ago(now() - act.checkedAt)}. Checked again every day.` : 'Not checked yet.'} Active = played in the last ${ACTIVE_DAYS} days, quiet = in the last ${QUIET_DAYS}, inactive = longer.</span>
+        ${manageHere || can(r, Level.Admin) ? html`<form method="post" action="/groups/${groupId}">${csrfField(r.session)}<input type="hidden" name="action" value="activity-check"><button class="secondary sm"${running ? new Html(' disabled') : ''}>Check now</button></form>` : ''}</div>
+        ${chips}
+        ${card(
+          null,
+          shown.length
+            ? html`<div class="table-wrap"><table><thead><tr><th>Member</th><th>Rank</th><th>Last played</th><th>Played (7 days)</th><th>Played (30 days)</th><th>Trainings (30 days)</th><th>Status</th></tr></thead><tbody>
+              ${shown.map(
+                (m) => html`<tr><td>${who(m.userId)}</td><td class="nowrap">${roleName(m.roleId)}</td>
+                  <td class="nowrap">${m.row?.lastJoin ? html`<span title="${utc(m.row.lastJoin * 1000)}">${ago(now() - m.row.lastJoin * 1000)}</span>` : html`<span class="muted">never</span>`}</td>
+                  <td>${hrs(m.week)}</td><td>${hrs(m.month)}</td><td>${m.row?.hasProfile ? m.row.trainings30 : '–'}</td>
+                  <td>${badge(STATUS[m.status][0], STATUS[m.status][1])}</td></tr>`,
+              )}</tbody></table></div>
+              ${pages > 1 ? html`<div class="pager"><span class="muted">${rows.length} members · page ${pageNo} of ${pages}</span><span class="btn-row">${pageNo > 1 ? html`<a class="btn sm secondary" href="${qs(statusWant, pageNo - 1)}">Previous</a>` : ''}${pageNo < pages ? html`<a class="btn sm secondary" href="${qs(statusWant, pageNo + 1)}">Next</a>` : ''}</span></div>` : ''}`
+            : empty(act.checkedAt ? 'Nobody here' : 'Not checked yet', act.checkedAt ? 'Nobody matches this filter.' : running ? 'Reading everyone’s records. This page refreshes by itself.' : 'Press Check now, or wait for the daily check.'),
+          { flush: shown.length > 0 },
+        )}`;
+    } else if (tab === 'applications') {
+      const reviewer = await canReview(services, groupId, { tier: actorOf(r).tier, robloxId: r.access?.robloxId });
+      const set = g.entry?.applications;
+      const all = await services.applications.list({ groupId });
+      const pending = all.filter((a) => a.status === 'pending');
+      const decided = all.filter((a) => a.status !== 'pending').slice(0, 20);
+      const who = await people(all.map((a) => a.robloxId));
+      const budget = { n: 10 };
+      const cards = await Promise.all(
+        pending.map(async (a) => html`<section class="card approval">
+          <div class="approval-main">
+            <div class="approval-top">${badge('Application', 'accent')}<span class="muted">${ago(now() - a.createdAt)}</span></div>
+            <h3>${who(a.robloxId)}</h3>
+            <dl class="answers">${a.answers.map((x) => html`<dt>${x.q}</dt><dd>${x.a || '—'}</dd>`)}</dl>
+          </div>
+          <div class="approval-side">
+            <dl class="meta"><dt>Discord</dt><dd>${faceHtml(await face(a.discordId, budget))}</dd></dl>
+            ${
+              reviewer
+                ? html`<form method="post" action="/groups/${groupId}" class="stack">${csrfField(r.session)}<input type="hidden" name="action" value="app-decide"><input type="hidden" name="id" value="${a.id}">
+                  ${field('Note (sent to them)', `note-${a.id}`, html`<textarea id="note-${a.id}" name="note" rows="2" maxlength="300" placeholder="Optional"></textarea>`)}
+                  <div class="btn-row"><button class="ok" name="decision" value="accept">Accept</button><button class="danger" name="decision" value="reject">Reject</button></div></form>`
+                : html`<p class="muted">This division’s officers decide these.</p>`
+            }
+          </div></section>`),
+      );
+      // settings: officers who manage the group, and admins
+      const manage = await canManageGroup(r, groupId);
+      const guildIds = new Set<string>([...(await myGuilds(r)).map((x) => x.id), ...(g.entry?.guildId ? [g.entry.guildId] : [])]);
+      const chOptions: Option[] = [...guildIds].flatMap((gid) => {
+        const guild = deps.client()?.guilds.cache.get(gid);
+        return guild ? channelOptions(guild).map((o) => ({ value: o.value, label: `${guild.name} › ${o.label}` })) : [];
+      });
+      const settingsCard = manage
+        ? card(
+            'Application settings',
+            html`<form method="post" action="/groups/${groupId}">${csrfField(r.session)}<input type="hidden" name="action" value="apps-settings">
+              <label class="check"><input type="checkbox" name="open" value="1"${set?.open ? new Html(' checked') : ''}> Taking applications (/apply shows this division)</label>
+              ${field('Questions (one per line, up to 5)', 'questions', html`<textarea id="questions" name="questions" rows="5" maxlength="600" placeholder="Why do you want to join?&#10;How active are you each week?&#10;What time zone are you in?">${(set?.questions ?? []).join('\n')}</textarea>`, 'Each up to 100 characters. They come up in a form in Discord.')}
+              <div class="fields">
+                ${field('Rank when accepted', 'startRoleId', select('startRoleId', give.map((x) => ({ value: String(x.id), label: `${x.rank} · ${x.name}` })), set?.startRoleId ? String(set.startRoleId) : undefined, { none: '— the group’s default rank —' }))}
+                ${field('Review channel', 'channelId', select('channelId', chOptions, set?.channelId, { none: '— pick a channel —' }), 'Applications are posted here with Accept and Reject. Keep it officers-only.')}
+              </div>
+              <div class="btn-row"><button>Save</button></div></form>
+              <p class="hint">Accepting lets them into the Roblox group (they must have pressed Join on it) and gives them the starting rank. The bot’s Roblox account needs permission to accept join requests and change ranks in this group.</p>`,
+          )
+        : '';
+      content = html`${set?.open ? '' : html`<div class="flash">This division isn’t taking applications${manage ? ' yet. Turn it on below.' : '.'}</div>`}
+        ${pending.length ? cards : card(null, empty('No applications waiting', set?.open ? 'New ones from /apply show up here and in the review channel.' : undefined))}
+        ${
+          decided.length
+            ? card(
+                'Recently decided',
+                html`<div class="table-wrap"><table><thead><tr><th>Member</th><th>Result</th><th>By</th><th>When</th></tr></thead><tbody>
+                ${decided.map((a) => html`<tr><td>${who(a.robloxId)}</td><td>${a.status === 'accepted' ? badge('Accepted', 'ok') : badge('Rejected', 'bad')}${a.note ? html` <small class="muted">${a.note}</small>` : ''}</td><td>${a.decidedBy ?? ''}</td><td class="nowrap">${a.decidedAt ? ago(now() - a.decidedAt) : ''}</td></tr>`)}
+                </tbody></table></div>`,
+                { flush: true },
+              )
+            : ''
+        }
+        ${settingsCard}`;
+    } else if (tab === 'ranks') {
       content = card(
         null,
         roles.length
@@ -1324,13 +1610,14 @@ export function createDashboard(deps: DashboardDeps) {
         { flush: roles.length > 0 },
       );
     } else if (tab === 'settings') {
-      const guilds = [...(deps.client()?.guilds.cache.values() ?? [])].map((x) => ({ value: x.id, label: x.name }));
+      const guilds = (await myGuilds(r)).map((x) => ({ value: x.id, label: x.name }));
       content = html`${card(
         'Settings',
         html`<form method="post" action="/groups/${groupId}">${csrfField(r.session)}<input type="hidden" name="action" value="settings"><div class="fields">
           ${field('Short name', 'label', html`<input id="label" name="label" maxlength="60" value="${g.entry?.label ?? ''}" placeholder="${g.info?.name ?? ''}">`, 'Leave empty to use the Roblox group’s name.')}
           ${field('Discord invite', 'discordInvite', html`<input id="discordInvite" name="discordInvite" maxlength="80" value="${g.entry?.discordInvite ?? ''}" placeholder="https://discord.gg/…">`, 'A link to this group’s Discord server.')}
           ${field('Discord server with the bot', 'guildId', select('guildId', guilds, g.entry?.guildId, { none: '— none —' }), 'If the bot is in this group’s server, pick it to link its settings page.')}
+          ${field('Who can change ranks here', 'managerRank', select('managerRank', roles.filter((x) => x.rank > 0 && x.rank < 255).map((x) => ({ value: String(x.rank), label: `${x.name} (rank ${x.rank}) and up in this group` })), g.entry?.managerRank ? String(g.entry.managerRank) : undefined, { none: '— dashboard Admins only —' }), 'Dashboard Officers holding this rank in this group can change ranks here, only below their own.')}
         </div><div class="btn-row"><button>Save</button></div></form>`,
       )}
       ${
@@ -1363,8 +1650,8 @@ export function createDashboard(deps: DashboardDeps) {
           return html`<tr><td>${who(m.userId)}</td><td class="nowrap"><b>${roleName(m.roleId)}</b></td>
             <td class="nowrap">${m.joinedAt ? new Date(m.joinedAt).toISOString().slice(0, 10) : '–'}</td>
             <td>${l ? faceHtml(await face(l.discordId, budget)) : badge('Not linked', 'muted')}</td>
-            <td><form method="post" action="/groups/${groupId}" class="inline-rank">${csrfField(r.session)}<input type="hidden" name="action" value="rank"><input type="hidden" name="userId" value="${m.userId}"><input type="hidden" name="expectRoleId" value="${m.roleId}"><input type="hidden" name="back" value="${back}">
-              ${select('roleId', give.map((x) => ({ value: String(x.id), label: `${x.rank} · ${x.name}` })), String(m.roleId), { none: null, id: `role-${m.userId}` })}<button class="secondary sm">Set</button></form></td></tr>`;
+            <td>${!manageHere ? '' : html`<form method="post" action="/groups/${groupId}" class="inline-rank">${csrfField(r.session)}<input type="hidden" name="action" value="rank"><input type="hidden" name="userId" value="${m.userId}"><input type="hidden" name="expectRoleId" value="${m.roleId}"><input type="hidden" name="back" value="${back}">
+              ${select('roleId', give.map((x) => ({ value: String(x.id), label: `${x.rank} · ${x.name}` })), String(m.roleId), { none: null, id: `role-${m.userId}` })}<button class="secondary sm">Set</button></form>`}</td></tr>`;
         }),
       );
       const qs = (p: Record<string, string | undefined>) => {
@@ -1382,7 +1669,7 @@ export function createDashboard(deps: DashboardDeps) {
         error
           ? empty('Couldn’t read the members', error.slice(0, 200))
           : list.members.length
-            ? html`<div class="table-wrap"><table><thead><tr><th>Member</th><th>Rank</th><th>Joined</th><th>Discord</th><th>Change rank</th></tr></thead><tbody>${rows}</tbody></table></div>
+            ? html`<div class="table-wrap"><table><thead><tr><th>Member</th><th>Rank</th><th>Joined</th><th>Discord</th><th>${manageHere ? 'Change rank' : ''}</th></tr></thead><tbody>${rows}</tbody></table></div>
               <div class="pager"><span class="muted">${roleId ? `${roleName(roleId)} · ` : ''}${list.members.length} shown</span><span class="btn-row">${after ? html`<a class="btn sm secondary" href="${qs({ role: roleId ? String(roleId) : undefined })}">First page</a>` : ''}${list.nextPageToken ? html`<a class="btn sm secondary" href="${qs({ role: roleId ? String(roleId) : undefined, after: list.nextPageToken })}">Next page</a>` : ''}</span></div>`
             : empty('Nobody here', roleId ? 'Nobody holds this rank.' : 'This group has no members the bot can see.'),
         { flush: list.members.length > 0 },
@@ -1392,11 +1679,13 @@ export function createDashboard(deps: DashboardDeps) {
     return page(r, {
       title: g.name,
       nav: 'groups',
+      refreshSec: refresh ? 5 : undefined,
       body: html`<header class="page-head"><div class="server-top">${groupIcon(g, 56)}<div><h1>${g.name}</h1>
         <p class="sub">${groupKind(g)}${g.info ? ` · ${g.info.memberCount.toLocaleString('en-GB')} members` : ''} · <a href="/groups">All groups</a>${g.isArmy ? html` · <a href="/promotions">Points-ladder promotions</a>` : ''}</p></div></div>
-        <div class="actions">${groupLinks(g)}</div></header>
+        <div class="actions">${groupLinks(g, can(r, Level.Admin))}</div></header>
       ${g.error ? html`<div class="flash bad">Couldn't read this group from Roblox: ${g.error.slice(0, 160)}</div>` : ''}
-      <nav class="tabs" aria-label="Group">${GROUP_TABS.map(([k, label]) => html`<a href="/groups/${groupId}?tab=${k}"${k === tab ? new Html(' aria-current="page"') : ''}>${label}</a>`)}</nav>
+      <p class="muted small-note">Rank changes here: ${g.entry?.managerRank ? `dashboard Officers with ${roles.find((x) => x.rank === g.entry!.managerRank)?.name ?? `rank ${g.entry.managerRank}`} or higher in this group, and Admins` : 'dashboard Admins only'}${manageHere ? ' · you can' : ''}.</p>
+      <nav class="tabs" aria-label="Group">${groupTabs.map(([k, label]) => html`<a href="/groups/${groupId}?tab=${k}"${k === tab ? new Html(' aria-current="page"') : ''}>${label}</a>`)}</nav>
       ${content}`,
     });
   }
@@ -1425,25 +1714,71 @@ export function createDashboard(deps: DashboardDeps) {
     if (groupId !== army && !entry) throw new NotFound();
     const base: DivisionEntry = entry ?? { groupId, addedAt: now(), addedBy: byName };
     if (f.action === 'rank') {
-      const { user, from, to, discordUpdated } = await changeRank(services, {
+      await needManage(r, groupId);
+      const change = await changeRank(services, {
       client: deps.client(),
         groupId,
         userId: Number(f.userId),
         roleId: Number(f.roleId),
         expectRoleId: f.expectRoleId ? Number(f.expectRoleId) : undefined,
-        actor: { tier: Tier.Owner },
+        actor: actorOf(r),
         audit: { actorId: by.id, actorName: `${byName} (dashboard)` },
       });
-      flash(r.session, 'ok', `${user?.name ?? f.userId} is now ${to.name} (was ${from.roleName}).${discordUpdated ? ' Discord roles updated.' : ''}`);
+      flash(r.session, 'ok', `${change.user?.name ?? f.userId} is now ${change.to.name} (was ${change.from.roleName}). ${discordNote(change)}`);
       const back = f.back ?? '';
       return back.startsWith(`/groups/${groupId}`) || /^\/members\/\d{1,19}$/.test(back) ? back : `/groups/${groupId}`;
+    }
+    if (f.action === 'activity-check') {
+      if (!(await canManageGroup(r, groupId)) && !can(r, Level.Admin)) throw new UserFacingError('Only officers who manage this group can start a check.');
+      services.activity.refreshGroup(groupId).catch((err) => services.logger.warn({ err, groupId }, 'activity check failed'));
+      flash(r.session, 'ok', 'Checking everyone’s records. It takes a moment for a big group.');
+      return `/groups/${groupId}?tab=activity`;
+    }
+    if (f.action === 'app-decide') {
+      const accept = f.decision === 'accept';
+      const { app, detail } = await decideApplication(services, deps.client(), f.id ?? '', {
+        accept,
+        byName,
+        byDiscordId: by.id,
+        tier: actorOf(r).tier,
+        robloxId: r.access?.robloxId,
+        note: f.note,
+        dashboard: true,
+      });
+      flash(r.session, 'ok', accept ? `Accepted ${app.robloxName}. ${detail}`.trim() : `Rejected ${app.robloxName}. They have been told.`);
+      return `/groups/${groupId}?tab=applications`;
+    }
+    if (f.action === 'apps-settings') {
+      await needManage(r, groupId);
+      const questions = (f.questions ?? '')
+        .split(/\r?\n/)
+        .map((q) => q.trim())
+        .filter(Boolean);
+      if (questions.length > 5) throw new UserFacingError('At most 5 questions (a Discord form holds 5 boxes).');
+      if (questions.some((q) => q.length > 100)) throw new UserFacingError('Keep each question to 100 characters.');
+      const open = f.open === '1';
+      const roles = assignable(await services.groups.listRoles(groupId).catch(() => [] as GroupRole[]));
+      const startRoleId = roles.find((x) => String(x.id) === f.startRoleId)?.id;
+      const channelId = f.channelId && /^\d{15,25}$/.test(f.channelId) ? f.channelId : undefined;
+      if (channelId) {
+        const ch = await client().channels.fetch(channelId).catch(() => null);
+        const gid = ch && 'guildId' in ch ? ch.guildId : null;
+        if (!ch?.isSendable() || !gid || (gid !== entry?.guildId && !(await canInGuild(r, gid, Tier.Administrator)))) throw new UserFacingError('Pick a review channel the bot can post in, in this group’s Discord server or one you manage.');
+      }
+      if (open && (!questions.length || !channelId)) throw new UserFacingError('To take applications, add at least one question and a review channel.');
+      await services.divisions.put({ ...base, applications: { open, questions, startRoleId, channelId } });
+      await audit(r, 'Application settings changed', `Group ${groupId}: ${open ? 'open' : 'closed'}, ${questions.length} questions, start role ${startRoleId ?? 'default'}, channel ${channelId ? `<#${channelId}>` : 'none'}`);
+      flash(r.session, 'ok', open ? 'Saved. /apply shows this division now.' : 'Saved.');
+      return `/groups/${groupId}?tab=applications`;
     }
     if (f.action === 'settings') {
       const invite = (f.discordInvite ?? '').trim();
       if (invite && !okInvite(invite)) throw new UserFacingError('The Discord invite should look like https://discord.gg/abc123.');
-      const guildId = f.guildId && deps.client()?.guilds.cache.has(f.guildId) ? f.guildId : undefined;
-      await services.divisions.put({ ...base, label: (f.label ?? '').trim().slice(0, 60) || undefined, discordInvite: invite || undefined, guildId });
-      await audit(r, 'Group settings changed', `Group ${groupId}: invite ${invite || 'none'}, server ${guildId ?? 'none'}`);
+      const guildId = f.guildId && deps.client()?.guilds.cache.has(f.guildId) && (await canInGuild(r, f.guildId, Tier.Administrator)) ? f.guildId : entry?.guildId;
+      const mr = Number(f.managerRank);
+      const managerRank = Number.isInteger(mr) && mr >= 1 && mr <= 254 ? mr : undefined;
+      await services.divisions.put({ ...base, label: (f.label ?? '').trim().slice(0, 60) || undefined, discordInvite: invite || undefined, guildId, managerRank });
+      await audit(r, 'Group settings changed', `Group ${groupId}: invite ${invite || 'none'}, server ${guildId ?? 'none'}, ranks changed by ${managerRank ? `rank ${managerRank}+` : 'admins only'}`);
       flash(r.session, 'ok', 'Saved.');
       return `/groups/${groupId}?tab=settings`;
     }
@@ -1596,7 +1931,8 @@ export function createDashboard(deps: DashboardDeps) {
 
   async function panelsPage(r: Req): Promise<string> {
     const c = deps.client();
-    const list = await services.panels.list();
+    const mineIds = new Set((await myGuilds(r)).map((g) => g.id));
+    const list = (await services.panels.list()).filter((p) => mineIds.has(p.guildId));
     const rows = list.map((p) => {
       const g = c?.guilds.cache.get(p.guildId);
       const chName = g?.channels.cache.get(p.channelId)?.name;
@@ -1630,9 +1966,10 @@ export function createDashboard(deps: DashboardDeps) {
   }
 
   async function newPanelPage(r: Req, v?: PanelValues, error?: string): Promise<string> {
-    const guilds = [...client().guilds.cache.values()].sort((a, b) => a.name.localeCompare(b.name));
+    client();
+    const guilds = await myGuilds(r);
     const want = v?.guildId || r.url.searchParams.get('guild') || (guilds.length === 1 ? guilds[0]!.id : '');
-    const guild = want ? client().guilds.cache.get(want) : undefined;
+    const guild = want ? guilds.find((g) => g.id === want) : undefined;
     if (!guild) {
       return page(r, {
         title: 'New panel',
@@ -1653,6 +1990,7 @@ export function createDashboard(deps: DashboardDeps) {
   async function editPanelPage(r: Req, messageId: string, v?: PanelValues, error?: string): Promise<string> {
     const rec = await services.panels.get(messageId);
     if (!rec) throw new NotFound();
+    if (!(await canInGuild(r, rec.guildId, Tier.Administrator))) throw new Forbidden(Level.Owner, 'This needs Administrator (4) in that Discord server.');
     const guild = guildOr404(rec.guildId);
     const msg = await fetchPanelMessage(client(), rec.guildId, rec.channelId, messageId);
     if (!msg) {
@@ -1695,6 +2033,7 @@ export function createDashboard(deps: DashboardDeps) {
         if (!m) throw new UserFacingError('Paste the whole message link (right-click the panel → Copy Message Link).');
         const [, guildId, channelId, messageId] = m as unknown as [string, string, string, string];
         guildOr404(guildId);
+        await needInGuild(r, guildId, Tier.Administrator, 'Adding panels');
         const msg = await fetchPanelMessage(client(), guildId, channelId, messageId);
         if (!msg) throw new UserFacingError("Can't find that message. The bot needs View Channel and Read Message History there.");
         if (msg.author.id !== client().user?.id) throw new UserFacingError('That message wasn’t posted by the bot, so it can’t be edited.');
@@ -1721,6 +2060,7 @@ export function createDashboard(deps: DashboardDeps) {
     const v = readPanelForm(f);
     if (path === '/panels/new') {
       const guild = guildOr404(v.guildId);
+      await needInGuild(r, guild.id, Tier.Administrator, 'Posting panels');
       if (f.action === 'preview') return newPanelPage(r, v);
       try {
         if (!channelOptions(guild).some((o) => o.value === v.channelId)) throw new UserFacingError('Pick the channel to post in.');
@@ -1737,6 +2077,7 @@ export function createDashboard(deps: DashboardDeps) {
     const m = /^\/panels\/(\d{15,25})$/.exec(path);
     const rec = m ? await services.panels.get(m[1]!) : null;
     if (!m || !rec) throw new NotFound();
+    await needInGuild(r, rec.guildId, Tier.Administrator, 'Changing panels');
     const messageId = m[1]!;
     if (f.action === 'forget') {
       await services.panels.remove(messageId);
@@ -1929,13 +2270,246 @@ export function createDashboard(deps: DashboardDeps) {
     throw new UserFacingError('Unknown action.');
   }
 
+  // ---------- audit log ----------
+
+  interface AuditFilter {
+    q: string;
+    who: string;
+    action: string;
+    guild: string;
+    src: 'all' | 'dashboard' | 'discord';
+    page: number;
+  }
+
+  function readAuditFilter(u: URL): AuditFilter {
+    const src = u.searchParams.get('src');
+    return {
+      q: (u.searchParams.get('q') ?? '').trim().slice(0, 100),
+      who: (u.searchParams.get('who') ?? '').trim().slice(0, 30),
+      action: (u.searchParams.get('action') ?? '').trim().slice(0, 80),
+      guild: (u.searchParams.get('guild') ?? '').trim().slice(0, 25),
+      src: src === 'dashboard' || src === 'discord' ? src : 'all',
+      page: Math.max(1, Math.min(10_000, Number(u.searchParams.get('page')) || 1)),
+    };
+  }
+
+  /** Entries this person may see (owners: all; admins: their servers, plus ones not tied to a server), filtered. */
+  async function auditRows(r: Req, f: AuditFilter): Promise<StoredAudit[]> {
+    const all = await services.audit.list();
+    const mine = can(r, Level.Owner) ? null : new Set((await myGuilds(r)).map((g) => g.id));
+    const q = f.q.toLowerCase();
+    return all.filter(
+      (e) =>
+        (!mine || !e.guildId || mine.has(e.guildId)) &&
+        (!f.who || e.actorId === f.who) &&
+        (!f.action || e.action === f.action) &&
+        (!f.guild || e.guildId === f.guild) &&
+        (f.src === 'all' || (f.src === 'dashboard') === e.actorName.endsWith('(dashboard)')) &&
+        (!q || `${e.actorName} ${e.action} ${e.target ?? ''} ${e.detail ?? ''}`.toLowerCase().includes(q)),
+    );
+  }
+
+  /** Discord mentions in audit text, as names. */
+  function mentionsToNames(text: string): string {
+    const c = deps.client();
+    return text
+      .replace(/<@!?(\d{15,25})>/g, (_m, id: string) => `@${c?.users.cache.get(id)?.username ?? id}`)
+      .replace(/<#(\d{15,25})>/g, (_m, id: string) => {
+        for (const g of c?.guilds.cache.values() ?? []) {
+          const ch = g.channels.cache.get(id);
+          if (ch) return `#${ch.name}`;
+        }
+        return `#${id}`;
+      })
+      .replace(/<@&(\d{15,25})>/g, (_m, id: string) => {
+        for (const g of c?.guilds.cache.values() ?? []) {
+          const role = g.roles.cache.get(id);
+          if (role) return `@${role.name}`;
+        }
+        return `@role`;
+      });
+  }
+
+  const auditQuery = (f: AuditFilter, page?: number) => {
+    const p = new URLSearchParams();
+    if (f.q) p.set('q', f.q);
+    if (f.who) p.set('who', f.who);
+    if (f.action) p.set('action', f.action);
+    if (f.guild) p.set('guild', f.guild);
+    if (f.src !== 'all') p.set('src', f.src);
+    if (page && page > 1) p.set('page', String(page));
+    const str = p.toString();
+    return str ? `?${str}` : '';
+  };
+
+  async function auditPage(r: Req): Promise<string> {
+    const f = readAuditFilter(r.url);
+    const visible = await auditRows(r, { ...f, q: '', who: '', action: '', guild: '', src: 'all' });
+    const rows = await auditRows(r, f);
+    const pages = Math.max(1, Math.ceil(rows.length / PAGE_SIZE));
+    const pageNo = Math.min(f.page, pages);
+    const shown = rows.slice((pageNo - 1) * PAGE_SIZE, pageNo * PAGE_SIZE);
+    const budget = { n: 15 };
+    const actions = [...new Set(visible.map((e) => e.action))].sort();
+    const people = [...new Map(visible.map((e) => [e.actorId, e.actorName.replace(/ \(dashboard\)$/, '')])).entries()].sort((a, b) => a[1].localeCompare(b[1]));
+    const c = deps.client();
+    const guilds = [...new Set(visible.map((e) => e.guildId).filter((x): x is string => !!x))].map((id) => ({ value: id, label: c?.guilds.cache.get(id)?.name ?? id }));
+    const opt = (v: string, label: string, cur: string) => html`<option value="${v}"${v === cur ? new Html(' selected') : ''}>${label}</option>`;
+    const body = await Promise.all(
+      shown.map(async (e) => {
+        const dash = e.actorName.endsWith('(dashboard)');
+        return html`<tr>
+          <td class="nowrap" title="${utc(e.t)}">${ago(now() - e.t)}<br><small class="muted">${utc(e.t).slice(5)}</small></td>
+          <td>${faceHtml(await face(e.actorId, budget), e.actorName.replace(/ \(dashboard\)$/, ''))}</td>
+          <td>${badge(e.action, e.ok ? 'muted' : 'bad')} ${dash ? badge('dashboard', 'info') : ''}</td>
+          <td class="wrap">${e.target ? html`<b>${mentionsToNames(e.target)}</b><br>` : ''}<span class="cmd">${mentionsToNames(e.detail ?? '').slice(0, 400)}</span></td>
+          <td class="nowrap">${e.guildId ? (c?.guilds.cache.get(e.guildId)?.name ?? e.guildId) : html`<span class="muted">–</span>`}</td>
+        </tr>`;
+      }),
+    );
+    return page(r, {
+      title: 'Audit log',
+      nav: 'audit',
+      body: html`${pageHead('Audit log', 'Every staff action through the bot and this dashboard: promotions, bans, posts, settings and more. Newest first; the latest 20,000 are kept.', html`<a class="btn secondary" href="/audit.csv${auditQuery({ ...f, page: 1 })}">Download CSV</a>`)}
+      <section class="card flush">
+        <form method="get" action="/audit" class="toolbar">
+          <div class="field grow"><label for="q">Search</label><span class="input-ic">${icon('search')}<input id="q" name="q" value="${f.q}" placeholder="Name, action or details"></span></div>
+          <div class="field"><label for="who">Who</label><select id="who" name="who">${opt('', 'Everyone', f.who)}${people.map(([id, name]) => opt(id, name, f.who))}</select></div>
+          <div class="field"><label for="action">Action</label><select id="action" name="action">${opt('', 'All actions', f.action)}${actions.map((a) => opt(a, a, f.action))}</select></div>
+          ${guilds.length ? html`<div class="field"><label for="guild">Server</label><select id="guild" name="guild">${opt('', 'All servers', f.guild)}${guilds.map((g) => opt(g.value, g.label, f.guild))}</select></div>` : ''}
+          <div class="field"><label for="src">From</label><select id="src" name="src">${opt('all', 'Discord and dashboard', f.src)}${opt('discord', 'Discord', f.src)}${opt('dashboard', 'Dashboard', f.src)}</select></div>
+          <button>Filter</button>${f.q || f.who || f.action || f.guild || f.src !== 'all' ? html`<a class="btn secondary" href="/audit">Clear</a>` : ''}
+        </form>
+        ${
+          shown.length
+            ? html`<div class="table-wrap"><table><thead><tr><th>When</th><th>Who</th><th>Action</th><th>Details</th><th>Server</th></tr></thead><tbody>${body}</tbody></table></div>
+              <div class="pager"><span class="muted">${rows.length.toLocaleString('en-GB')} entr${rows.length === 1 ? 'y' : 'ies'} · page ${pageNo} of ${pages}</span>
+              <span class="btn-row">${pageNo > 1 ? html`<a class="btn sm secondary" href="/audit${auditQuery(f, pageNo - 1)}">Newer</a>` : ''}${pageNo < pages ? html`<a class="btn sm secondary" href="/audit${auditQuery(f, pageNo + 1)}">Older</a>` : ''}</span></div>`
+            : empty(visible.length ? 'Nothing matches' : 'Nothing recorded yet', visible.length ? 'Try a different search or clear the filters.' : 'Staff actions show up here as they happen.')
+        }
+      </section>`,
+    });
+  }
+
+  async function auditCsv(r: Req): Promise<Raw> {
+    const rows = await auditRows(r, readAuditFilter(r.url));
+    const c = deps.client();
+    const lines = [['time_utc', 'discord_id', 'name', 'action', 'target', 'detail', 'ok', 'server'].join(',')];
+    for (const e of rows) lines.push([utc(e.t), e.actorId, e.actorName, e.action, e.target ?? '', mentionsToNames(e.detail ?? ''), e.ok ? 'yes' : 'no', e.guildId ? (c?.guilds.cache.get(e.guildId)?.name ?? e.guildId) : ''].map(csvCell).join(','));
+    return new Raw(lines.join('\r\n') + '\r\n', 'text/csv; charset=utf-8', { 'content-disposition': 'attachment; filename="hk1941-audit-log.csv"' });
+  }
+
+  // ---------- access (owners only) ----------
+
+  const LEVEL_OPTIONS: Option[] = ([0, 1, 2, 3] as const).map((l) => ({ value: String(l), label: LEVEL_NAMES[l] }));
+  const STAFF_OPTIONS: Option[] = ([1, 2, 3, 4, 5] as const).map((t) => ({ value: String(t), label: `${t} · ${TIER_NAMES[t]} and up` }));
+
+  async function accessPage(r: Req): Promise<string> {
+    const settings = await accessStore.get();
+    const roles = (await services.groups.listRoles(services.config.roblox.armyGroupId).catch(() => [] as GroupRole[])).filter((x) => x.rank > 0);
+    const rankOptions: Option[] = roles.map((x) => ({ value: String(x.rank), label: `${x.rank} · ${x.name} and up` }));
+    const ruleRow = (key: 'viewer' | 'officer' | 'admin', level: Level) => {
+      const rule = settings.rules[key] ?? {};
+      return html`<tr><td><b>${LEVEL_NAMES[level]}</b><br><small class="muted">${LEVEL_HINTS[level]}</small></td>
+        <td>${select(`${key}_rank`, rankOptions, rule.armyRank ? String(rule.armyRank) : undefined, { none: '— off —' })}</td>
+        <td>${select(`${key}_tier`, STAFF_OPTIONS, rule.staffTier ? String(rule.staffTier) : undefined, { none: '— off —' })}</td></tr>`;
+    };
+    const budget = { n: 15 };
+    const groupNames = new Map((await groupViews()).map((g) => [g.groupId, g.name]));
+    const people = await Promise.all(
+      Object.entries(settings.people)
+        .sort((a, b) => b[1].level - a[1].level)
+        .map(async ([id, p]) => {
+          const link = await services.links.get(id).catch(() => null);
+          return html`<tr><td>${faceHtml(await face(id, budget), html`<code>${id}</code>`)}</td>
+            <td>${link ? html`<a href="/members/${link.robloxId}">${link.robloxName}</a>` : html`<span class="muted">not linked</span>`}</td>
+            <td>${badge(LEVEL_NAMES[p.level], p.level === 0 ? 'bad' : p.level >= 3 ? 'accent' : 'muted')}${p.note ? html` <small class="muted">${p.note}</small>` : ''}${p.groups?.length ? html`<br><small class="muted">Also manages: ${p.groups.map((id) => groupNames.get(id) ?? id).join(', ')}</small>` : ''}</td>
+            <td class="nowrap muted">${p.by} · ${ago(now() - p.at)}</td>
+            <td class="right"><form method="post" action="/access">${csrfField(r.session)}<input type="hidden" name="action" value="unset"><input type="hidden" name="discordId" value="${id}"><button class="secondary sm">Remove</button></form></td></tr>`;
+        }),
+    );
+    const owners = await Promise.all(cfg.adminIds.map(async (id) => faceHtml(await face(id, budget))));
+    const groupsList = await groupViews();
+    return page(r, {
+      title: 'Access',
+      nav: 'access',
+      body: html`${pageHead('Access', 'Who can sign in to the dashboard, and what they can do. Everyone signs in with Discord and needs a linked Roblox account (/verify). Levels are checked again every few minutes, so a promotion or demotion carries over.')}
+      ${card(
+        'Levels',
+        html`<div class="table-wrap"><table><tbody>${([1, 2, 3, 4] as const).map((l) => html`<tr><td class="nowrap"><b>${LEVEL_NAMES[l]}</b></td><td>${LEVEL_HINTS[l]}</td></tr>`)}</tbody></table></div>
+        <p class="hint">Officers and admins can only change ranks below their own army rank, to ranks below it. Owners: ${owners} (set by DASHBOARD_ADMIN_IDS on the server).</p>`,
+      )}
+      ${card(
+        'Who gets in automatically',
+        html`<form method="post" action="/access">${csrfField(r.session)}<input type="hidden" name="action" value="rules">
+          <div class="table-wrap"><table><thead><tr><th>Level</th><th>Army rank (linked account)</th><th>Or in-game staff tier</th></tr></thead><tbody>
+            ${ruleRow('admin', Level.Admin)}${ruleRow('officer', Level.Officer)}${ruleRow('viewer', Level.Viewer)}
+          </tbody></table></div>
+          <p class="hint">The highest level whose rule they meet wins. Leave everything off to keep the dashboard to the owners and the people below.</p>
+          <div class="btn-row"><button>Save rules</button></div></form>`,
+      )}
+      ${card(
+        'People',
+        html`${people.length ? html`<div class="table-wrap"><table><thead><tr><th>Discord</th><th>Roblox</th><th>Level</th><th>Set by</th><th></th></tr></thead><tbody>${people}</tbody></table></div>` : html`<p class="muted">Nobody set by hand. Use this for someone the rules miss, or to block someone (No access).</p>`}
+        <form method="post" action="/access" class="row">${csrfField(r.session)}<input type="hidden" name="action" value="set">
+          ${field('Discord user ID', 'discordId', html`<input id="discordId" name="discordId" pattern="\\d{15,25}" required>`)}
+          ${field('Level', 'level', select('level', LEVEL_OPTIONS, '1', { none: null }))}
+          ${field('Note (optional)', 'note', html`<input id="note" name="note" maxlength="80" placeholder="e.g. Royal Rifles OC">`)}
+          <button>Set</button>
+          <fieldset class="group-picks"><legend>Officers: may also change ranks in</legend>${groupsList.map((g) => html`<label class="check"><input type="checkbox" name="g_${g.groupId}" value="1"> ${g.name}</label>`)}</fieldset></form>`,
+      )}`,
+    });
+  }
+
+  async function accessAction(r: Req): Promise<void> {
+    const f = r.form;
+    const by = r.session.user!.globalName ?? r.session.user!.username;
+    const settings: AccessSettings = await accessStore.get();
+    if (f.action === 'rules') {
+      const read = (v: string | undefined, max: number) => {
+        const n = Number(v);
+        return Number.isInteger(n) && n >= 1 && n <= max ? n : undefined;
+      };
+      for (const key of ['viewer', 'officer', 'admin'] as const) {
+        const rule = { armyRank: read(f[`${key}_rank`], 254), staffTier: read(f[`${key}_tier`], 5) };
+        if (rule.armyRank || rule.staffTier) settings.rules[key] = rule;
+        else delete settings.rules[key];
+      }
+      await accessStore.set(settings);
+      await audit(r, 'Dashboard access rules changed', JSON.stringify(settings.rules));
+      flash(r.session, 'ok', 'Rules saved. They apply the next time each person’s access is checked (within a few minutes).');
+      return;
+    }
+    const id = (f.discordId ?? '').trim();
+    if (!/^\d{15,25}$/.test(id)) throw new UserFacingError('That isn’t a Discord user ID.');
+    if (cfg.adminIds.includes(id)) throw new UserFacingError('Owners are set on the server (DASHBOARD_ADMIN_IDS).');
+    if (f.action === 'set') {
+      const level = Number(f.level);
+      if (![0, 1, 2, 3].includes(level)) throw new UserFacingError('Pick a level.');
+      const groups = Object.keys(f).filter((k) => /^g_\d{1,15}$/.test(k) && f[k] === '1').map((k) => Number(k.slice(2)));
+      settings.people[id] = { level: level as 0 | 1 | 2 | 3, note: (f.note ?? '').trim().slice(0, 80) || undefined, by, at: now(), groups: groups.length ? groups : undefined };
+      await accessStore.set(settings);
+      await audit(r, 'Dashboard access set', `<@${id}> → ${LEVEL_NAMES[level as Level]}`);
+      flash(r.session, 'ok', `Set to ${LEVEL_NAMES[level as Level]}.`);
+      return;
+    }
+    if (f.action === 'unset') {
+      delete settings.people[id];
+      await accessStore.set(settings);
+      await audit(r, 'Dashboard access removed', `<@${id}> (back to the rules)`);
+      flash(r.session, 'ok', 'Removed. The rules decide their level now.');
+      return;
+    }
+    throw new UserFacingError('Unknown action.');
+  }
+
   // ---------- routing ----------
 
   async function route(r: Req): Promise<string | Redirect | Raw> {
     const path = r.url.pathname;
     const s = r.session;
 
-    if (path === '/login') return isAdmin(s) ? new Redirect('/') : loginPage(s);
+    if (path === '/login') return s.user && s.access?.level ? new Redirect('/') : loginPage(s);
     if (path === '/auth/discord' && r.method === 'GET') {
       const state = randomState();
       s.oauth = { state, next: s.oauth?.next };
@@ -1950,18 +2524,33 @@ export function createDashboard(deps: DashboardDeps) {
         return new Redirect('/login');
       }
       const user = await oauth.finish(code);
-      if (!cfg.adminIds.includes(user.id)) {
-        services.logger.warn({ user: user.id }, 'dashboard sign-in refused: not an admin');
-        return loginPage(s, true);
+      const check = await checkAccess(services, accessStore, user.id, cfg.adminIds);
+      if (check.level === Level.None) {
+        services.logger.warn({ user: user.id, why: check.why }, 'dashboard sign-in refused');
+        return loginPage(s, check.why);
       }
-      throw new SignedIn(user, want.next);
+      throw new SignedIn(user, want.next, { ...check, at: now() });
     }
     if (path === '/logout' && r.method === 'POST') throw new SignedOut();
 
-    if (!isAdmin(s)) {
+    if (!s.user) {
       // remember where they were going, but only real pages (not /favicon.ico and friends)
       if (r.method === 'GET' && RETURNABLE.test(path)) s.oauth = { state: '', next: path + r.url.search };
       return new Redirect('/login');
+    }
+    r.access = await accessOf(s);
+    if (r.access.level === Level.None) throw new SignedOut(r.access.why);
+    const need = levelNeeded(r.method, path, r.form.action);
+    if (r.access.level < need) throw new Forbidden(need);
+    if (path === '/access') {
+      if (r.method !== 'POST') return accessPage(r);
+      try {
+        await accessAction(r);
+      } catch (err) {
+        if (!(err instanceof UserFacingError)) throw err;
+        flash(s, 'bad', err.message);
+      }
+      return new Redirect('/access');
     }
 
     if (r.method === 'POST' && path === '/theme') {
@@ -1975,6 +2564,7 @@ export function createDashboard(deps: DashboardDeps) {
       let back = path;
       try {
         if (m) {
+          await needInGuild(r, m[1]!, Tier.Administrator, 'Changing this server');
           await serverAction(r, guildOr404(m[1]!));
           if (isTab(r.form.tab)) back = `${path}?tab=${r.form.tab}`;
         } else if (path === '/approvals') await approvalsAction(r);
@@ -2003,7 +2593,10 @@ export function createDashboard(deps: DashboardDeps) {
     if (path === '/game-log.csv') return gameLogCsv(r);
     if (path === '/servers') return serversPage(r);
     const sm = /^\/servers\/(\d{15,25})$/.exec(path);
-    if (sm) return serverPage(r, guildOr404(sm[1]!));
+    if (sm) {
+      if (!(await canInGuild(r, sm[1]!, Tier.Administrator))) throw new Forbidden(Level.Owner, 'This needs Administrator (4) in that Discord server.');
+      return serverPage(r, guildOr404(sm[1]!));
+    }
     if (path === '/links') return linksPage(r);
     if (path === '/promotions') return promotionsPage(r);
     if (path === '/members') return membersPage(r);
@@ -2012,6 +2605,8 @@ export function createDashboard(deps: DashboardDeps) {
     if (gm) return groupPage(r, Number(gm[1]));
     const mm = /^\/members\/(\d{1,19})$/.exec(path);
     if (mm) return memberPage(r, Number(mm[1]));
+    if (path === '/audit') return auditPage(r);
+    if (path === '/audit.csv') return auditCsv(r);
     if (path === '/panels') return panelsPage(r);
     if (path === '/panels/new') return newPanelPage(r);
     const pm = /^\/panels\/(\d{15,25})$/.exec(path);
@@ -2083,14 +2678,17 @@ export function createDashboard(deps: DashboardDeps) {
       else send(200, out);
     } catch (err) {
       if (err instanceof SignedIn) {
-        const fresh = sessions.renew(session, { user: err.user });
+        const fresh = sessions.renew(session, { user: err.user, access: err.access, theme: session.theme });
         cookies.splice(0, cookies.length, fresh.setCookie);
         services.logger.info({ user: err.user.id }, 'dashboard sign-in');
         const next = err.next && err.next.startsWith('/') && !err.next.startsWith('//') && RETURNABLE.test(err.next.split('?')[0]!) ? err.next : '/';
         send(303, '', { location: next });
       } else if (err instanceof SignedOut) {
         cookies.splice(0, cookies.length, sessions.destroy(session));
-        send(303, '', { location: '/login' });
+        if (err.why) send(403, loginPage(session, err.why));
+        else send(303, '', { location: '/login' });
+      } else if (err instanceof Forbidden) {
+        problem('Not allowed', err.text ?? `This needs ${LEVEL_NAMES[err.need]} access on the dashboard. An owner can change who has access.`, 403);
       } else if (err instanceof NotFound) {
         problem('Page not found', 'That page doesn’t exist.', 404);
       } else if (err instanceof UserFacingError || err instanceof OAuthError) {
@@ -2110,6 +2708,8 @@ export function createDashboard(deps: DashboardDeps) {
   const pollMs = deps.gameLogPollMs ?? 3 * 60_000;
   let poll: NodeJS.Timeout | undefined;
   let firstPoll: NodeJS.Timeout | undefined;
+  let firstActivity: NodeJS.Timeout | undefined;
+  let activityTimer: NodeJS.Timeout | undefined;
   const pollOnce = () => {
     services.adminLog.refresh().catch((err) => services.logger.debug({ err }, 'game log copy failed'));
   };
@@ -2125,6 +2725,12 @@ export function createDashboard(deps: DashboardDeps) {
             firstPoll = setTimeout(pollOnce, 5_000).unref();
             poll = setInterval(pollOnce, pollMs).unref();
           }
+          const actMs = deps.activityPollMs ?? (deps.gameLogPollMs === 0 ? 0 : 6 * 3600_000);
+          if (actMs > 0) {
+            const check = () => void services.activity.refreshIfStale().catch((err) => services.logger.warn({ err }, 'activity check failed'));
+            firstActivity = setTimeout(check, 2 * 60_000).unref();
+            activityTimer = setInterval(check, actMs).unref();
+          }
           resolve((server.address() as AddressInfo).port);
         });
       });
@@ -2132,7 +2738,12 @@ export function createDashboard(deps: DashboardDeps) {
     close(): Promise<void> {
       clearTimeout(firstPoll);
       clearInterval(poll);
-      return new Promise((resolve) => server.close(() => resolve()));
+      clearTimeout(firstActivity);
+      clearInterval(activityTimer);
+      return new Promise((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections(); // don't leave kept-alive sockets behind
+      });
     },
   };
 }
@@ -2141,7 +2752,16 @@ class SignedIn {
   constructor(
     readonly user: import('./session.js').WebUser,
     readonly next?: string,
+    readonly access?: AccessCheck & { at: number },
   ) {}
 }
-class SignedOut {}
+class SignedOut {
+  constructor(readonly why?: string) {}
+}
+class Forbidden {
+  constructor(
+    readonly need: Level,
+    readonly text?: string,
+  ) {}
+}
 class NotFound {}

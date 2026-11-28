@@ -13,8 +13,22 @@ export interface DivisionEntry {
   discordInvite?: string;
   /** a Discord server the bot is in that belongs to this group */
   guildId?: string;
+  /** dashboard Officers with this rank or higher IN THIS GROUP can change ranks here (unset = only Admins) */
+  managerRank?: number;
+  /** /apply settings for this group */
+  applications?: ApplicationSettings;
   addedAt: number;
   addedBy: string;
+}
+
+export interface ApplicationSettings {
+  open: boolean;
+  /** up to 5 questions (a Discord form holds 5 boxes) */
+  questions: string[];
+  /** the rank they get when accepted (a role ID in this group) */
+  startRoleId?: number;
+  /** where applications are posted for review (a channel in one of the bot's servers) */
+  channelId?: string;
 }
 
 export class DivisionStore {

@@ -111,7 +111,7 @@ describe('admin dashboard', () => {
     const { req, signIn } = await start({ id: IDS.otherUser });
     const res = await signIn();
     expect(res.status).toBe(200);
-    expect(await res.text()).toContain("isn't on the dashboard's admin list");
+    expect(await res.text()).toContain("can't use the dashboard");
     expect((await req('/')).headers.get('location')).toBe('/login');
   });
 

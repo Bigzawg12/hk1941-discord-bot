@@ -8,7 +8,11 @@
  * TODO: optionally have the bridge publish these tables to HK1941_Global so the bot can read them live.
  */
 
-export const POINTS = {
+/**
+ * Point weights (ServiceConfig.Points). These are the game's defaults; the dashboard can change them
+ * live (src/game/serviceSettings.ts), and the values here are then replaced in place.
+ */
+export const POINTS: PointWeights = {
   deployedPer10Min: 1,
   trainingAttended: 8,
   trainingPassed: 6,
@@ -21,7 +25,22 @@ export const POINTS = {
   medalOther: 10,
   qualification: 15,
   arrestMade: 3,
-} as const;
+};
+
+export interface PointWeights {
+  deployedPer10Min: number;
+  trainingAttended: number;
+  trainingPassed: number;
+  trainingHosted: number;
+  eventAttended: number;
+  capture: number;
+  aiKillsPer: number;
+  enemyKill: number;
+  medalGallantry: number;
+  medalOther: number;
+  qualification: number;
+  arrestMade: number;
+}
 
 export interface RankRequirement {
   next: string;

@@ -17,6 +17,8 @@ export interface Session {
   user?: WebUser;
   /** the Discord sign-in in progress */
   oauth?: { state: string; next?: string };
+  /** their dashboard access, worked out at sign-in and every few minutes after */
+  access?: import('./access.js').AccessCheck & { at: number };
   /** the dashboard is dark unless this is 'light' */
   theme?: 'light';
   /** one-off message for the next page */

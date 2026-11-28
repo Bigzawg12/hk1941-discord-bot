@@ -217,6 +217,20 @@ export class GroupsClient {
     return out;
   }
 
+  /** Their pending request to join the group, if any (the path to accept it). */
+  async joinRequestFor(groupId: number, userId: number): Promise<string | null> {
+    const res = await this.http.get<{ groupJoinRequests?: { path?: string; user?: string }[] }>(`${OPEN_CLOUD}/cloud/v2/groups/${groupId}/join-requests`, {
+      auth: true,
+      query: { maxPageSize: 10, filter: `user == 'users/${userId}'` },
+    });
+    return res.data?.groupJoinRequests?.find((j) => lastNumber(j.user) === userId)?.path ?? null;
+  }
+
+  /** Let them in (the path from joinRequestFor). */
+  async acceptJoinRequest(path: string): Promise<void> {
+    await this.http.post(`${OPEN_CLOUD}/cloud/v2/${path}:accept`, { auth: true, body: {} });
+  }
+
   /** Forget cached roles and info for a group (after its ranks change). */
   forgetGroup(groupId: number): void {
     this.rolesCache.delete(groupId);
