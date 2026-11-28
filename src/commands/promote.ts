@@ -92,12 +92,13 @@ export default defineCommand({
       return;
     }
     await interaction.deferUpdate();
-    const { user, to } = await changeRank(services, {
+    const { user, to, discordUpdated } = await changeRank(services, {
+      client: interaction.client,
       userId: Number(userIdS),
       roleId: Number(roleIdS),
       actor: { robloxId: ctx.caller.robloxId, tier: ctx.caller.tier },
       audit: { actorId: interaction.user.id, actorName: `${interaction.user.username}${ctx.caller.robloxName ? ` / ${ctx.caller.robloxName}` : ''}`, guildId: interaction.guildId },
     });
-    await interaction.editReply({ content: `✅ ${esc(user?.name ?? userIdS ?? '')} is now **${esc(to.name)}**. (In game it shows after they rejoin.)`, embeds: [], components: [] });
+    await interaction.editReply({ content: `✅ ${esc(user?.name ?? userIdS ?? '')} is now **${esc(to.name)}**.${discordUpdated ? ' Their Discord roles are updated.' : ''} (In game it shows after they rejoin.)`, embeds: [], components: [] });
   },
 });

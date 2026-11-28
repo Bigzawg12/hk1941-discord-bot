@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it } from 'vitest';
 import { progressOf, rosterFor } from '../src/game/promotions.js';
 import { createDashboard } from '../src/web/server.js';
-import { fakeClient, IDS, profileStoreValue, SAMPLE_PROFILE, testServices } from './helpers/fixtures.js';
-import { fakeGuild } from './helpers/guild.js';
+import { handleInteraction } from '../src/discord/dispatch.js';
+import { loadCommands } from '../src/loaders/commands.js';
+import { fakeButton, fakeClient, fakeInteraction, fakeModal, IDS, profileStoreValue, replyText, SAMPLE_PROFILE, testServices } from './helpers/fixtures.js';
+import { fakeGuild, VERIFIED } from './helpers/guild.js';
 import { json, type Call } from './helpers/mockFetch.js';
 
 const ADMIN = '123456789012345678';
@@ -27,12 +29,12 @@ afterEach(async () => {
   await Promise.all(open.splice(0).map((d) => d.close()));
 });
 
-async function start(over: { bannedUntil?: number } = {}) {
+async function start(over: { bannedUntil?: number; patchStatus?: number } = {}) {
   const patches: Call[] = [];
   const { services } = testServices(
     [
-      ['GET', `/cloud/v2/groups/${ARMY}/roles`, json({ groupRoles: ROLES })],
-      ['GET', `/cloud/v2/groups/${DIV}/roles`, json({ groupRoles: DIV_ROLES })],
+      ['GET', `/cloud/v2/groups/${ARMY}/roles`, () => json({ groupRoles: ROLES })],
+      ['GET', `/cloud/v2/groups/${DIV}/roles`, () => json({ groupRoles: DIV_ROLES })],
       ['GET', /\/cloud\/v2\/groups\/\d+$/, (url) => json({ id: url.pathname.split('/').pop(), displayName: url.pathname.endsWith(String(DIV)) ? 'Royal Rifles of Canada' : 'Canadian Army 1940s', memberCount: 42 })],
       [
         'GET',
@@ -48,12 +50,16 @@ async function start(over: { bannedUntil?: number } = {}) {
           return json({ groupMemberships: f.includes('roles/2') || f.includes('users/99') ? [MEMBERSHIP] : [] });
         },
       ],
-      ['PATCH', `/cloud/v2/groups/${ARMY}/memberships/m99`, (_u, call) => (patches.push(call), json({}))],
-      ['GET', 'groups.roblox.com/v2/users/99/groups/roles', json({ data: [{ group: { id: ARMY }, role: { id: 2, name: 'Private', rank: 2 } }, { group: { id: DIV }, role: { id: 51, name: 'Rifleman', rank: 1 } }] })],
-      ['POST', 'users.roblox.com/v1/usernames/users', json({ data: [{ id: 99, name: 'Pte_Target', displayName: 'Target' }] })],
-      ['POST', 'users.roblox.com/v1/users', json({ data: [{ id: 99, name: 'Pte_Target', displayName: 'Target' }] })],
-      ['GET', 'users.roblox.com/v1/users/99', json({ id: 99, name: 'Pte_Target', displayName: 'Target', description: '' })],
-      ['GET', 'thumbnails.roblox.com', json({ data: [{ targetId: 99, state: 'Completed', imageUrl: 'https://tr.rbxcdn.com/head.png' }] })],
+      [
+        'PATCH',
+        `/cloud/v2/groups/${ARMY}/memberships/m99`,
+        (_u, call) => (over.patchStatus ? json({ code: 'PERMISSION_DENIED', message: 'Insufficient permissions.' }, over.patchStatus) : (patches.push(call), json({}))),
+      ],
+      ['GET', 'groups.roblox.com/v2/users/99/groups/roles', () => json({ data: [{ group: { id: ARMY }, role: { id: 2, name: 'Private', rank: 2 } }, { group: { id: DIV }, role: { id: 51, name: 'Rifleman', rank: 1 } }] })],
+      ['POST', 'users.roblox.com/v1/usernames/users', () => json({ data: [{ id: 99, name: 'Pte_Target', displayName: 'Target' }] })],
+      ['POST', 'users.roblox.com/v1/users', () => json({ data: [{ id: 99, name: 'Pte_Target', displayName: 'Target' }] })],
+      ['GET', 'users.roblox.com/v1/users/99', () => json({ id: 99, name: 'Pte_Target', displayName: 'Target', description: '' })],
+      ['GET', 'thumbnails.roblox.com', () => json({ data: [{ targetId: 99, state: 'Completed', imageUrl: 'https://tr.rbxcdn.com/head.png' }] })],
       [
         'GET',
         'standard-datastores/datastore/entries/entry',
@@ -67,7 +73,7 @@ async function start(over: { bannedUntil?: number } = {}) {
         },
       ],
     ],
-    { DISCORD_CLIENT_SECRET: 's', SESSION_SECRET: 'x'.repeat(40), DASHBOARD_ADMIN_IDS: ADMIN },
+    { DISCORD_CLIENT_SECRET: 's', SESSION_SECRET: 'x'.repeat(40), DASHBOARD_ADMIN_IDS: ADMIN, OWNER_DISCORD_IDS: IDS.otherUser },
   );
   const fc = fakeClient();
   fc.client.guilds.cache.set(IDS.guild, fakeGuild().guild);
@@ -92,7 +98,7 @@ async function start(over: { bannedUntil?: number } = {}) {
   const post = (path: string, body: Record<string, string>) =>
     req(path, { method: 'POST', body: new URLSearchParams({ _csrf: csrf, ...body }).toString(), headers: { 'content-type': 'application/x-www-form-urlencoded' } });
   await services.adminLog.refresh();
-  return { services, req, post, patches };
+  return { services, req, post, patches, fc };
 }
 
 describe('promotions', () => {
@@ -211,5 +217,86 @@ describe('groups (army and divisions)', () => {
     expect(text).toContain('Divisions');
     expect(text).toContain('Rifleman (rank 1)');
     expect(text).toContain(`action="/groups/${DIV}"`);
+  });
+});
+
+describe('after a rank change', () => {
+  it('refreshes their Discord roles when they are linked', async () => {
+    const { post, req, services } = await start();
+    await services.links.linkVerified(IDS.staffUser, { id: 99, name: 'Pte_Target' }, 'manual');
+    await services.guilds.update(IDS.guild, 'test', (s) => {
+      s.verifiedRoleId = VERIFIED;
+    });
+    await post('/members/99', { action: 'rank', roleId: '3', expectRoleId: '2' });
+    expect(await (await req('/members/99')).text()).toContain('Discord roles updated');
+  });
+
+  it('explains when Roblox refuses', async () => {
+    const { post, req } = await start({ patchStatus: 403 });
+    await post('/members/99', { action: 'rank', roleId: '3', expectRoleId: '2' });
+    expect(await (await req('/members/99')).text()).toContain('isn&#39;t allowed to give Corporal');
+  });
+});
+
+describe('/nominate and bulk promotions', () => {
+  const APPROVAL = '600000000000000001';
+  async function withCommands() {
+    const t = await start();
+    t.services.commands = await loadCommands();
+    await t.services.guilds.update(IDS.guild, 'test', (s) => {
+      s.approvalChannelId = APPROVAL;
+    });
+    return t;
+  }
+
+  it('a request waits with buttons; a Moderator can’t approve; an owner can, and the asker is told', async () => {
+    const { services, fc, patches } = await withCommands();
+    const cmd = fakeInteraction({ commandName: 'nominate', strings: { user: 'Pte_Target', rank: '3', reason: 'Led the patrol' }, roles: [IDS.modRole], client: fc });
+    await handleInteraction(services, cmd.interaction as never);
+    expect(replyText(cmd.replies.at(-1))).toMatch(/Sent for approval/);
+    const q = fc.sent.at(-1)!;
+    expect(q.channelId).toBe(APPROVAL);
+    const embed = JSON.stringify((q.payload.embeds as { toJSON(): unknown }[])[0]!.toJSON());
+    expect(embed).toContain('**Private** → **Corporal**');
+    expect(embed).toContain('Led the patrol');
+    const [req] = await services.promotionRequests.list({ status: 'pending' });
+    expect(req).toMatchObject({ userId: 99, toName: 'Corporal', byId: IDS.staffUser });
+
+    const mod = fakeButton({ customId: `nominate:approve:${req!.id}`, userId: '999999999999999999', roles: [IDS.modRole], client: fc });
+    await handleInteraction(services, mod.interaction as never);
+    expect(replyText(mod.replies.at(-1))).toMatch(/needs Administrator/);
+    expect(patches).toHaveLength(0);
+
+    const ok = fakeButton({ customId: `nominate:approve:${req!.id}`, userId: IDS.otherUser, client: fc });
+    await handleInteraction(services, ok.interaction as never);
+    expect(patches).toHaveLength(1);
+    expect((await services.promotionRequests.get(req!.id))?.status).toBe('approved');
+    expect(String(fc.dms.at(-1)?.payload.content)).toMatch(/promote Pte_Target to Corporal was approved/);
+  });
+
+  it('a request can be rejected with a note, from Discord or the dashboard', async () => {
+    const { services, fc, post, patches } = await withCommands();
+    const ask = async () => {
+      const cmd = fakeInteraction({ commandName: 'nominate', strings: { user: 'Pte_Target', rank: '3', reason: 'r' }, roles: [IDS.modRole], client: fc });
+      await handleInteraction(services, cmd.interaction as never);
+      return (await services.promotionRequests.list({ status: 'pending' }))[0]!;
+    };
+    const a = await ask();
+    const no = fakeModal({ customId: `nominate:why:${a.id}`, fields: { note: 'Not yet' }, userId: IDS.otherUser, client: fc });
+    await handleInteraction(services, no.interaction as never);
+    expect(await services.promotionRequests.get(a.id)).toMatchObject({ status: 'rejected', note: 'Not yet' });
+    const b = await ask();
+    await post('/promotions', { action: 'decide', id: b.id, decision: 'approve' });
+    expect((await services.promotionRequests.get(b.id))?.status).toBe('approved');
+    expect(patches).toHaveLength(1);
+  });
+
+  it('the dashboard promotes everyone ticked', async () => {
+    const { post, req, patches } = await start();
+    const queue = await (await req('/promotions')).text();
+    expect(queue).toContain('name="pick_99" value="2:3"');
+    await post('/promotions', { action: 'bulk', pick_99: '2:3', reason: 'Monthly promotions' });
+    expect(patches).toHaveLength(1);
+    expect(await (await req('/promotions')).text()).toContain('Promoted 1: Pte_Target → Corporal.');
   });
 });

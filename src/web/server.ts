@@ -7,7 +7,8 @@ import { commandOf, type GameLogEntry } from '../game/adminLogArchive.js';
 import { CERT_BY_ID, MAX_STRIPES, MEDAL_BY_ID, RANKS } from '../game/gameConfig.js';
 import { computePoints, hours, standing } from '../game/points.js';
 import type { DivisionEntry } from '../game/divisions.js';
-import { assignable, changeRank, nextRole, progressOf, rosterFor, type Roster } from '../game/promotions.js';
+import { decideRequest } from '../commands/nominate.js';
+import { assignable, bulkPromote, changeRank, describeBulk, nextRole, progressOf, rosterFor, type Roster } from '../game/promotions.js';
 import type { GuildSettings, StaffTier } from '../guilds/settings.js';
 import { describeSync, NICKNAME_TOKENS, syncEverywhere } from '../linking/memberSync.js';
 import type { AccountLink } from '../linking/store.js';
@@ -768,9 +769,13 @@ export function createDashboard(deps: DashboardDeps) {
   const PROMO_TABS = [
     ['queue', 'Ready for promotion'],
     ['progress', 'Progress by rank'],
+    ['requests', 'Requests'],
     ['history', 'History'],
   ] as const;
   type PromoTab = (typeof PROMO_TABS)[number][0];
+  /** most promotions in one go */
+  const BULK_MAX = 25;
+  const promoteMany = (picks: { userId: number; from: number; to: number }[], o: Parameters<typeof bulkPromote>[2]) => bulkPromote(services, picks, o);
   const LADDER = Object.keys(RANKS).map(Number).sort((a, b) => a - b);
   const memberLink = (id: number, name: string) => html`<a class="strong" href="/members/${id}">${name}</a>`;
 
@@ -816,8 +821,43 @@ export function createDashboard(deps: DashboardDeps) {
     let scanFor: number | null = null;
     let status: Html = html``;
     let refresh = false;
+    const waiting = (await services.promotionRequests.list({ status: 'pending' })).length;
 
-    if (tab === 'history') {
+    if (tab === 'requests') {
+      const all = await services.promotionRequests.list();
+      const pending = all.filter((x) => x.status === 'pending');
+      const decided = all.filter((x) => x.status !== 'pending').slice(0, 25);
+      const who = await people(all.map((x) => x.userId));
+      const budget = { n: 10 };
+      const rows = await Promise.all(
+        pending.map(async (q) => html`<tr><td>${who(q.userId)}</td>
+          <td class="nowrap">${q.fromName} → <b>${q.toName}</b></td>
+          <td>${faceHtml(await face(q.byId, budget), q.byName)}</td>
+          <td class="wrap">${q.reason}</td>
+          <td class="nowrap">${ago(now() - q.createdAt)}</td>
+          <td><form method="post" action="/promotions" class="inline-rank">${csrfField(r.session)}<input type="hidden" name="action" value="decide"><input type="hidden" name="id" value="${q.id}">
+            <input name="note" maxlength="300" placeholder="Note (optional)" aria-label="Note">
+            <button class="ok sm" name="decision" value="approve">Approve</button><button class="danger sm" name="decision" value="reject">Reject</button></form></td></tr>`),
+      );
+      content = html`${card(
+        null,
+        pending.length
+          ? html`<div class="table-wrap"><table><thead><tr><th>Member</th><th>Change</th><th>Asked by</th><th>Reason</th><th>Waiting</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
+          : empty('No requests waiting', 'Staff ask for promotions with /nominate in Discord. They show here and in the approval channel.'),
+        { flush: pending.length > 0 },
+      )}
+      ${
+        decided.length
+          ? card(
+              'Recently decided',
+              html`<div class="table-wrap"><table><thead><tr><th>Member</th><th>Change</th><th>Result</th><th>By</th><th>When</th></tr></thead><tbody>
+              ${decided.map((q) => html`<tr><td>${who(q.userId)}</td><td class="nowrap">${q.fromName} → ${q.toName}</td><td>${q.status === 'approved' ? badge('Approved', 'ok') : badge('Rejected', 'bad')}${q.note ? html` <small class="muted">${q.note}</small>` : ''}</td><td>${q.decidedBy ?? ''}</td><td class="nowrap">${q.decidedAt ? ago(now() - q.decidedAt) : ''}</td></tr>`)}
+              </tbody></table></div>`,
+              { flush: true },
+            )
+          : ''
+      }`;
+    } else if (tab === 'history') {
       const list = (await services.promotionLog.list()).slice(0, 200);
       const who = await people(list.map((e) => e.userId));
       content = card(
@@ -878,7 +918,7 @@ export function createDashboard(deps: DashboardDeps) {
         ready.map(async (e) => {
           const to = nextRole(roles, e.rank);
           const l = linkOf.get(e.userId);
-          return html`<tr><td>${who(e.userId)}</td>
+          return html`<tr><td class="pick">${to ? html`<input type="checkbox" name="pick_${e.userId}" value="${e.roleId}:${to.id}" aria-label="Pick ${e.userId}">` : ''}</td><td>${who(e.userId)}</td>
             <td class="nowrap">${e.roleName} → <b>${to?.name ?? e.next!.next}</b></td>
             <td class="nowrap">${e.points} <small class="muted">/ ${e.next!.points}</small></td>
             <td class="nowrap">${e.trainings} <small class="muted">/ ${e.next!.trainings}</small></td>
@@ -889,7 +929,9 @@ export function createDashboard(deps: DashboardDeps) {
       content = card(
         null,
         ready.length
-          ? html`<div class="table-wrap"><table><thead><tr><th>Member</th><th>Promotion</th><th>Points</th><th>Trainings</th><th>Discord</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>`
+          ? html`<form method="post" action="/promotions">${csrfField(r.session)}<input type="hidden" name="action" value="bulk">
+            <div class="table-wrap"><table><thead><tr><th class="pick"></th><th>Member</th><th>Promotion</th><th>Points</th><th>Trainings</th><th>Discord</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
+            <div class="pager"><span class="muted">${ready.length} ready · tick people, then promote them all at once (up to ${BULK_MAX}).</span><span class="btn-row"><input name="reason" maxlength="200" placeholder="Reason (optional)" aria-label="Reason" class="bulk-reason"><button>Promote ticked</button></span></div></form>`
           : s.roster
             ? empty('Nobody is ready right now', 'Members show up here once they have the points and trainings for their next rank.')
             : empty('Checking the group…', 'Reading everyone’s service record. This page refreshes by itself.'),
@@ -903,16 +945,40 @@ export function createDashboard(deps: DashboardDeps) {
       refreshSec: refresh ? 5 : undefined,
       body: html`${pageHead(
         'Promotions',
-        html`Points-ladder ranks in the army group. Officer ranks are by selection: change those from a member’s page. ${tab === 'history' ? '' : status}`,
+        html`Points-ladder ranks in the army group. Officer ranks are by selection: change those from a member’s page. ${tab === 'history' || tab === 'requests' ? '' : status}`,
         html`<form method="get" action="/members" class="search-inline"><input name="q" placeholder="Roblox name or ID" aria-label="Find a member" required><button class="secondary">Find</button></form>
-        ${tab === 'history' ? '' : html`<form method="post" action="/promotions">${csrfField(r.session)}<input type="hidden" name="action" value="refresh"><input type="hidden" name="back" value="${r.url.pathname + r.url.search}"><input type="hidden" name="rank" value="${scanFor ?? ''}"><button class="secondary">Check again</button></form>`}`,
+        ${tab === 'history' || tab === 'requests' ? '' : html`<form method="post" action="/promotions">${csrfField(r.session)}<input type="hidden" name="action" value="refresh"><input type="hidden" name="back" value="${r.url.pathname + r.url.search}"><input type="hidden" name="rank" value="${scanFor ?? ''}"><button class="secondary">Check again</button></form>`}`,
       )}
-      <nav class="tabs" aria-label="Promotions">${PROMO_TABS.map(([k, label]) => html`<a href="/promotions?tab=${k}"${k === tab ? new Html(' aria-current="page"') : ''}>${label}</a>`)}</nav>
+      <nav class="tabs" aria-label="Promotions">${PROMO_TABS.map(([k, label]) => html`<a href="/promotions?tab=${k}"${k === tab ? new Html(' aria-current="page"') : ''}>${label}${k === 'requests' && waiting ? html` <span class="count">${waiting}</span>` : ''}</a>`)}</nav>
       ${content}`,
     });
   }
 
   async function promotionsAction(r: Req): Promise<Redirect> {
+    const by = r.session.user!;
+    const byName = by.globalName ?? by.username;
+    if (r.form.action === 'decide') {
+      const approve = r.form.decision === 'approve';
+      const q = await decideRequest(services, deps.client(), r.form.id ?? '', { approve, byName, byDiscordId: by.id, tier: Tier.Owner, note: r.form.note, dashboard: true });
+      flash(r.session, 'ok', approve ? `Approved: ${q.userName} is now ${q.toName}.` : `Rejected. ${q.byName} has been told.`);
+      return new Redirect('/promotions?tab=requests');
+    }
+    if (r.form.action === 'bulk') {
+      const picks = Object.entries(r.form)
+        .filter(([k]) => /^pick_\d{1,19}$/.test(k))
+        .map(([k, v]) => ({ userId: Number(k.slice(5)), from: Number(v.split(':')[0]), to: Number(v.split(':')[1]) }))
+        .filter((x) => x.from > 0 && x.to > 0);
+      if (!picks.length) throw new UserFacingError('Tick at least one person.');
+      if (picks.length > BULK_MAX) throw new UserFacingError(`At most ${BULK_MAX} at once.`);
+      const results = await promoteMany(picks, {
+        actor: { tier: Tier.Owner },
+        audit: { actorId: by.id, actorName: `${byName} (dashboard)` },
+        reason: r.form.reason,
+        client: deps.client(),
+      });
+      flash(r.session, results.failed.length ? 'bad' : 'ok', describeBulk(results));
+      return new Redirect('/promotions');
+    }
     if (r.form.action !== 'refresh') throw new UserFacingError('Unknown action.');
     const rank = Number(r.form.rank);
     rosterFor(services)
@@ -1142,7 +1208,8 @@ export function createDashboard(deps: DashboardDeps) {
   async function memberAction(r: Req, id: number): Promise<void> {
     if (r.form.action !== 'rank') throw new UserFacingError('Unknown action.');
     const by = r.session.user!;
-    const { user, from, to } = await changeRank(services, {
+    const { user, from, to, discordUpdated } = await changeRank(services, {
+      client: deps.client(),
       userId: id,
       roleId: Number(r.form.roleId),
       expectRoleId: r.form.expectRoleId ? Number(r.form.expectRoleId) : undefined,
@@ -1150,7 +1217,7 @@ export function createDashboard(deps: DashboardDeps) {
       audit: { actorId: by.id, actorName: `${by.globalName ?? by.username} (dashboard)` },
       reason: r.form.reason,
     });
-    flash(r.session, 'ok', `${user?.name ?? id} is now ${to.name} (was ${from.roleName}). In game it shows after they rejoin.`);
+    flash(r.session, 'ok', `${user?.name ?? id} is now ${to.name} (was ${from.roleName}).${discordUpdated ? ' Discord roles updated.' : ''} In game it shows after they rejoin.`);
   }
 
   // ---------- groups (army + divisions) ----------
@@ -1358,7 +1425,8 @@ export function createDashboard(deps: DashboardDeps) {
     if (groupId !== army && !entry) throw new NotFound();
     const base: DivisionEntry = entry ?? { groupId, addedAt: now(), addedBy: byName };
     if (f.action === 'rank') {
-      const { user, from, to } = await changeRank(services, {
+      const { user, from, to, discordUpdated } = await changeRank(services, {
+      client: deps.client(),
         groupId,
         userId: Number(f.userId),
         roleId: Number(f.roleId),
@@ -1366,7 +1434,7 @@ export function createDashboard(deps: DashboardDeps) {
         actor: { tier: Tier.Owner },
         audit: { actorId: by.id, actorName: `${byName} (dashboard)` },
       });
-      flash(r.session, 'ok', `${user?.name ?? f.userId} is now ${to.name} (was ${from.roleName}).`);
+      flash(r.session, 'ok', `${user?.name ?? f.userId} is now ${to.name} (was ${from.roleName}).${discordUpdated ? ' Discord roles updated.' : ''}`);
       const back = f.back ?? '';
       return back.startsWith(`/groups/${groupId}`) || /^\/members\/\d{1,19}$/.test(back) ? back : `/groups/${groupId}`;
     }

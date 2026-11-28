@@ -400,6 +400,10 @@ table.kv td{padding:6px 0;border-bottom:1px solid var(--line)}
 table.kv tr.total td{font-weight:700;border-bottom:0;padding-top:9px}
 .flash.confirm{margin-bottom:14px}
 .inline-rank{display:flex;gap:6px;align-items:center}
+.inline-rank input{min-height:30px;padding:3px 8px;font-size:.85rem;width:150px}
+th.pick,td.pick{width:34px;padding-right:0}
+.bulk-reason{width:220px;min-height:30px;padding:3px 8px}
+.tabs .count{margin-left:6px}
 .inline-rank select{min-height:30px;padding:3px 8px;width:auto;max-width:220px;font-size:.85rem}
 .chips a small{opacity:.7;margin-left:2px}
 a.plain{color:inherit;text-decoration:none}

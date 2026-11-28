@@ -21,7 +21,7 @@ import { ServerDirectory } from './roblox/servers.js';
 import { UsersClient } from './roblox/users.js';
 import { AdminLogArchive } from './game/adminLogArchive.js';
 import { DivisionStore } from './game/divisions.js';
-import { PromotionLog } from './game/promotions.js';
+import { PromotionLog, PromotionRequests } from './game/promotions.js';
 import { EventSync } from './sync/eventSync.js';
 import type { Services } from './types.js';
 
@@ -37,6 +37,8 @@ export interface ServiceOverrides {
   promotionLogFile?: string | null;
   /** the groups list on the dashboard; null = memory only (tests) */
   divisionsFile?: string | null;
+  /** /nominate requests; null = memory only (tests) */
+  promotionRequestsFile?: string | null;
   now?: () => number;
   sleep?: (ms: number) => Promise<void>;
 }
@@ -87,6 +89,7 @@ export function createServices(config: BotConfig, logger: Logger, overrides: Ser
       overrides.now,
     ),
     promotionLog: new PromotionLog(overrides.promotionLogFile === undefined ? join(config.dataDir, 'promotions.json') : overrides.promotionLogFile),
+    promotionRequests: new PromotionRequests(overrides.promotionRequestsFile === undefined ? join(config.dataDir, 'promotion-requests.json') : overrides.promotionRequestsFile),
     divisions: new DivisionStore(overrides.divisionsFile === undefined ? join(config.dataDir, 'divisions.json') : overrides.divisionsFile),
     bridge: new BridgeClient({
       publisher: new MessagingPublisher(openCloud, config.roblox.universeId),

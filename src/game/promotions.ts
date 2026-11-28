@@ -1,11 +1,13 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import { dirname } from 'node:path';
+import type { Client } from 'discord.js';
+import { syncEverywhere } from '../linking/memberSync.js';
 import { Tier } from '../permissions/tiers.js';
 import type { GroupRole, UserRank } from '../roblox/groups.js';
 import type { RobloxUser } from '../roblox/users.js';
 import type { Services } from '../types.js';
 import { mapLimit } from '../util/cache.js';
-import { UserFacingError } from '../util/errors.js';
+import { RobloxApiError, UserFacingError } from '../util/errors.js';
 import { RANKS, type RankRequirement } from './gameConfig.js';
 import { standing } from './points.js';
 
@@ -182,6 +184,27 @@ export interface RankChange {
   user: RobloxUser | null;
   from: UserRank;
   to: GroupRole;
+  /** their Discord roles and nickname were refreshed (they have a linked account) */
+  discordUpdated: boolean;
+}
+
+/** Turn Roblox's refusal into something staff can act on. */
+export function explainRankError(err: unknown, to: GroupRole): unknown {
+  if (!(err instanceof RobloxApiError)) return err;
+  const body = `${err.body ?? ''} ${err.message}`;
+  if (/same user/i.test(body)) {
+    return new UserFacingError("Roblox won't let the bot's account change its own rank. Change that one on the Roblox group page.");
+  }
+  if (err.status === 403) {
+    return new UserFacingError(
+      `Roblox refused: the bot's Roblox account isn't allowed to give ${to.name} here. Its role in the group needs "Manage lower-ranked member ranks", and it can only change people below its own rank, to ranks below its own.`,
+    );
+  }
+  if (err.status === 401) {
+    return new UserFacingError("Roblox refused the bot's Open Cloud key (401). Check the key has Groups read and write, and that the bot server's IP is allowed.");
+  }
+  if (err.status === 404) return new UserFacingError('Roblox says they are no longer in the group.');
+  return err;
 }
 
 /** Change someone's army rank after checking it's allowed, and record it in the audit log. */
@@ -197,6 +220,8 @@ export async function changeRank(
     reason?: string;
     /** refuse if their rank isn't this any more (someone else changed it meanwhile) */
     expectRoleId?: number;
+    /** to refresh their Discord roles and nickname afterwards (when they have a linked account) */
+    client?: Client | null;
   },
 ): Promise<RankChange> {
   const group = opts.groupId ?? services.config.roblox.armyGroupId;
@@ -211,7 +236,11 @@ export async function changeRank(
   if (from.roleId === to.id) throw new UserFacingError(`They are already ${to.name}.`);
   await rankGuard(services, opts.actor, from.rank, to.rank, group);
   const user = await services.users.getById(opts.userId).catch(() => null);
-  await services.groups.setRole(group, opts.userId, to.id);
+  try {
+    await services.groups.setRole(group, opts.userId, to.id);
+  } catch (err) {
+    throw explainRankError(err, to);
+  }
   rosterFor(services).forget();
   services.groups.forgetGroup(group); // member counts changed
   const reason = opts.reason?.trim().slice(0, 200);
@@ -227,7 +256,16 @@ export async function changeRank(
     ok: true,
     guildId: opts.audit.guildId ?? undefined,
   });
-  return { user, from, to };
+  let discordUpdated = false;
+  const link = opts.client ? await services.links.findByRoblox(opts.userId).catch(() => null) : null;
+  if (link && opts.client) {
+    const results = await syncEverywhere(services, opts.client, link.discordId, `Rank changed to ${to.name}`).catch((err) => {
+      services.logger.warn({ err }, 'could not update Discord roles after a rank change');
+      return [];
+    });
+    discordUpdated = results.length > 0;
+  }
+  return { user, from, to, discordUpdated };
 }
 
 // ---------- history ----------
@@ -288,4 +326,118 @@ export class PromotionLog {
     const list = await this.load();
     return (userId === undefined ? list : list.filter((e) => e.userId === userId)).slice();
   }
+}
+
+// ---------- promotion requests (/nominate) ----------
+
+/** Someone below the approvers asking for a rank change; an approver decides. */
+export interface PromotionRequest {
+  id: string;
+  guildId: string;
+  groupId: number;
+  userId: number;
+  userName: string;
+  fromRoleId: number;
+  fromName: string;
+  toRoleId: number;
+  toName: string;
+  /** Discord ID and name of whoever asked */
+  byId: string;
+  byName: string;
+  reason: string;
+  createdAt: number;
+  status: 'pending' | 'approved' | 'rejected';
+  decidedBy?: string;
+  decidedAt?: number;
+  note?: string;
+  /** the message with the Approve / Reject buttons */
+  queue?: { channelId: string; messageId: string };
+}
+
+/** Kept in DATA_DIR/promotion-requests.json; decided ones are forgotten after 60 days. */
+export class PromotionRequests {
+  private items: Map<string, PromotionRequest> | null = null;
+  private writing: Promise<void> = Promise.resolve();
+  static readonly KEEP_MS = 60 * 86400_000;
+
+  constructor(private readonly file: string | null) {}
+
+  private async load(): Promise<Map<string, PromotionRequest>> {
+    if (this.items) return this.items;
+    this.items = new Map();
+    if (!this.file) return this.items;
+    try {
+      const raw = JSON.parse(await readFile(this.file, 'utf8')) as { requests?: PromotionRequest[] };
+      for (const r of raw.requests ?? []) if (r && typeof r.id === 'string' && typeof r.userId === 'number') this.items.set(r.id, r);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    }
+    return this.items;
+  }
+
+  async get(id: string): Promise<PromotionRequest | null> {
+    const r = (await this.load()).get(id);
+    return r ? structuredClone(r) : null;
+  }
+
+  async put(r: PromotionRequest): Promise<void> {
+    const items = await this.load();
+    items.set(r.id, structuredClone(r));
+    const now = Date.now();
+    for (const [id, x] of items) if (x.status !== 'pending' && now - (x.decidedAt ?? x.createdAt) > PromotionRequests.KEEP_MS) items.delete(id);
+    if (!this.file) return;
+    const file = this.file;
+    const body = JSON.stringify({ version: 1, requests: [...items.values()] }, null, 2);
+    this.writing = this.writing.then(async () => {
+      await mkdir(dirname(file), { recursive: true });
+      await writeFile(`${file}.tmp`, body, 'utf8');
+      await rename(`${file}.tmp`, file);
+    });
+    await this.writing;
+  }
+
+  /** Newest first. */
+  async list(filter: { status?: PromotionRequest['status']; userId?: number } = {}): Promise<PromotionRequest[]> {
+    return [...(await this.load()).values()]
+      .filter((r) => (!filter.status || r.status === filter.status) && (filter.userId === undefined || r.userId === filter.userId))
+      .sort((a, b) => b.createdAt - a.createdAt)
+      .map((r) => structuredClone(r));
+  }
+}
+
+// ---------- several at once ----------
+
+export interface BulkResult {
+  done: { userId: number; name: string; to: string }[];
+  failed: { userId: number; name: string; why: string }[];
+}
+
+/** Promote several people one after another; one failing doesn't stop the rest. */
+export async function bulkPromote(
+  services: Services,
+  picks: { userId: number; from: number; to: number }[],
+  o: { actor: { robloxId?: number; tier: number }; audit: { actorId: string; actorName: string; guildId?: string | null }; reason?: string; client?: Client | null },
+): Promise<BulkResult> {
+  const out: BulkResult = { done: [], failed: [] };
+  const names = await services.users.namesFor(picks.map((p) => p.userId)).catch(() => new Map<number, RobloxUser>());
+  for (const p of picks) {
+    const name = names.get(p.userId)?.name ?? String(p.userId);
+    try {
+      const c = await changeRank(services, { userId: p.userId, roleId: p.to, expectRoleId: p.from, actor: o.actor, audit: o.audit, reason: o.reason, client: o.client });
+      out.done.push({ userId: p.userId, name, to: c.to.name });
+    } catch (err) {
+      if (!(err instanceof UserFacingError)) services.logger.warn({ err, userId: p.userId }, 'bulk promotion failed');
+      out.failed.push({ userId: p.userId, name, why: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return out;
+}
+
+export function describeBulk(r: BulkResult): string {
+  return [
+    r.done.length ? `Promoted ${r.done.length}: ${r.done.map((d) => `${d.name} → ${d.to}`).join(', ')}.` : '',
+    r.failed.length ? `Not done (${r.failed.length}): ${r.failed.map((f) => `${f.name}: ${f.why}`).join(' · ')}` : '',
+  ]
+    .filter(Boolean)
+    .join(' ');
 }

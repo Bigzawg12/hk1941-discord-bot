@@ -7,7 +7,7 @@ import { testServices } from './helpers/fixtures.js';
 
 const EXPECTED = [
   'announce', 'arrests', 'award', 'ban', 'eligible', 'event', 'help', 'kick', 'link',
-  'medals', 'panel', 'points', 'post', 'promote', 'record', 'release', 'setup', 'ssu', 'status', 'unban', 'update', 'verify',
+  'medals', 'nominate', 'panel', 'points', 'post', 'promote', 'record', 'release', 'setup', 'ssu', 'status', 'unban', 'update', 'verify',
 ];
 
 describe('command loader', () => {
