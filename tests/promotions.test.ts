@@ -14,6 +14,11 @@ const ROLES = [
   { id: '9', displayName: 'Lieutenant', rank: 9 },
   { id: '255', displayName: 'Owner', rank: 255 },
 ];
+const DIV = 555000111;
+const DIV_ROLES = [
+  { id: '51', displayName: 'Rifleman', rank: 1, memberCount: 30 },
+  { id: '52', displayName: 'Lance Corporal', rank: 2, memberCount: 8 },
+];
 const MEMBERSHIP = { path: `groups/${ARMY}/memberships/m99`, user: 'users/99', role: `groups/${ARMY}/roles/2` };
 
 const open: { close(): Promise<void> }[] = [];
@@ -26,6 +31,14 @@ async function start(over: { bannedUntil?: number } = {}) {
   const { services } = testServices(
     [
       ['GET', `/cloud/v2/groups/${ARMY}/roles`, json({ groupRoles: ROLES })],
+      ['GET', `/cloud/v2/groups/${DIV}/roles`, json({ groupRoles: DIV_ROLES })],
+      ['GET', /\/cloud\/v2\/groups\/\d+$/, (url) => json({ id: url.pathname.split('/').pop(), displayName: url.pathname.endsWith(String(DIV)) ? 'Royal Rifles of Canada' : 'Canadian Army 1940s', memberCount: 42 })],
+      [
+        'GET',
+        `/cloud/v2/groups/${DIV}/memberships`,
+        () => json({ groupMemberships: [{ path: `groups/${DIV}/memberships/d99`, user: 'users/99', role: `groups/${DIV}/roles/51`, createTime: '2026-01-02T00:00:00Z' }], nextPageToken: 'tok2' }),
+      ],
+      ['PATCH', `/cloud/v2/groups/${DIV}/memberships/d99`, (_u, call) => (patches.push(call), json({}))],
       [
         'GET',
         `/cloud/v2/groups/${ARMY}/memberships`,
@@ -35,7 +48,7 @@ async function start(over: { bannedUntil?: number } = {}) {
         },
       ],
       ['PATCH', `/cloud/v2/groups/${ARMY}/memberships/m99`, (_u, call) => (patches.push(call), json({}))],
-      ['GET', 'groups.roblox.com/v2/users/99/groups/roles', json({ data: [{ group: { id: ARMY }, role: { id: 2, name: 'Private', rank: 2 } }] })],
+      ['GET', 'groups.roblox.com/v2/users/99/groups/roles', json({ data: [{ group: { id: ARMY }, role: { id: 2, name: 'Private', rank: 2 } }, { group: { id: DIV }, role: { id: 51, name: 'Rifleman', rank: 1 } }] })],
       ['POST', 'users.roblox.com/v1/usernames/users', json({ data: [{ id: 99, name: 'Pte_Target', displayName: 'Target' }] })],
       ['POST', 'users.roblox.com/v1/users', json({ data: [{ id: 99, name: 'Pte_Target', displayName: 'Target' }] })],
       ['GET', 'users.roblox.com/v1/users/99', json({ id: 99, name: 'Pte_Target', displayName: 'Target', description: '' })],
@@ -146,5 +159,52 @@ describe('promotions', () => {
   it('finds a member by name', async () => {
     const { req } = await start();
     expect((await req('/members?q=Pte_Target')).headers.get('location')).toBe('/members/99');
+  });
+});
+
+describe('groups (army and divisions)', () => {
+  it('adds a division, lists its members with their rank, and changes a rank there', async () => {
+    const { req, post, patches, services } = await start();
+    expect(await (await req('/groups')).text()).toContain('Canadian Army 1940s');
+    const added = await post('/groups', { action: 'add', group: `https://www.roblox.com/groups/${DIV}/Royal-Rifles`, label: '' });
+    expect(added.headers.get('location')).toBe(`/groups/${DIV}`);
+    expect((await services.divisions.get(DIV))?.addedBy).toBe('The Owner');
+    const members = await (await req(`/groups/${DIV}`)).text();
+    expect(members).toContain('Royal Rifles of Canada');
+    expect(members).toContain('href="https://www.roblox.com/groups/555000111"');
+    expect(members).toContain('<b>Rifleman</b>');
+    expect(members).toContain('2026-01-02');
+    expect(members).toContain('after=tok2'); // next page
+    const back = `/groups/${DIV}?tab=members`;
+    const res = await post(`/groups/${DIV}`, { action: 'rank', userId: '99', roleId: '52', expectRoleId: '51', back });
+    expect(res.headers.get('location')).toBe(back);
+    expect(patches.at(-1)!.body).toEqual({ role: `groups/${DIV}/roles/52` });
+    expect((await services.promotionLog.list(99))[0]).toMatchObject({ groupId: DIV, from: 'Rifleman', to: 'Lance Corporal' });
+  });
+
+  it('settings: Discord invite and server; bad invites refused; the army can’t be removed', async () => {
+    const { req, post, services } = await start();
+    await post('/groups', { action: 'add', group: String(DIV) });
+    await post(`/groups/${DIV}`, { action: 'settings', label: 'RRC', discordInvite: 'https://discord.gg/rrc1941', guildId: IDS.guild });
+    expect(await services.divisions.get(DIV)).toMatchObject({ label: 'RRC', discordInvite: 'https://discord.gg/rrc1941', guildId: IDS.guild });
+    const page = await (await req(`/groups/${DIV}`)).text();
+    expect(page).toContain('<h1>RRC</h1>');
+    expect(page).toContain('href="https://discord.gg/rrc1941"');
+    expect(page).toContain(`href="/servers/${IDS.guild}"`);
+    await post(`/groups/${DIV}`, { action: 'settings', discordInvite: 'javascript:alert(1)' });
+    expect((await services.divisions.get(DIV))?.discordInvite).toBe('https://discord.gg/rrc1941');
+    await post(`/groups/${ARMY}`, { action: 'remove', confirm: '1' });
+    expect(await (await req('/groups')).text()).toContain('The army group always stays');
+    await post(`/groups/${DIV}`, { action: 'remove', confirm: '1' });
+    expect(await services.divisions.get(DIV)).toBeNull();
+  });
+
+  it('member page: their rank in each division, changeable there', async () => {
+    const { req, post } = await start();
+    await post('/groups', { action: 'add', group: String(DIV) });
+    const text = await (await req('/members/99')).text();
+    expect(text).toContain('Divisions');
+    expect(text).toContain('Rifleman (rank 1)');
+    expect(text).toContain(`action="/groups/${DIV}"`);
   });
 });

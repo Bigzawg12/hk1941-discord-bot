@@ -145,6 +145,7 @@ ${
     ${item('/approvals', 'Approvals', 'approvals', opts.counts?.approvals)}
     ${item('/promotions', 'Promotions', 'promotions')}
     ${item('/members', 'Members', 'members')}
+    ${item('/groups', 'Groups', 'groups')}
     ${item('/panels', 'Panels', 'panels')}
     ${item('/game-log', 'Game log', 'gamelog')}
     ${item('/servers', 'Servers', 'servers')}
@@ -398,6 +399,11 @@ progress::-moz-progress-bar{background:var(--gold);border-radius:3px}
 table.kv td{padding:6px 0;border-bottom:1px solid var(--line)}
 table.kv tr.total td{font-weight:700;border-bottom:0;padding-top:9px}
 .flash.confirm{margin-bottom:14px}
+.inline-rank{display:flex;gap:6px;align-items:center}
+.inline-rank select{min-height:30px;padding:3px 8px;width:auto;max-width:220px;font-size:.85rem}
+.chips a small{opacity:.7;margin-left:2px}
+a.plain{color:inherit;text-decoration:none}
+a.plain:hover{text-decoration:underline}
 .panel-grid{grid-template-columns:minmax(0,1fr) minmax(0,1fr)}
 @media (max-width:1100px){.panel-grid{grid-template-columns:minmax(0,1fr)}}
 .panel-grid>.card{position:sticky;top:20px;align-self:start}

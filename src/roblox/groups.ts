@@ -42,8 +42,33 @@ interface CloudRoles {
 }
 
 interface CloudMemberships {
-  groupMemberships?: { path?: string; user?: string; role?: string }[];
+  groupMemberships?: { path?: string; user?: string; role?: string; createTime?: string }[];
   nextPageToken?: string;
+}
+
+interface CloudGroup {
+  id?: string;
+  displayName?: string;
+  description?: string;
+  owner?: string;
+  memberCount?: number;
+  createTime?: string;
+}
+
+export interface GroupInfo {
+  id: number;
+  name: string;
+  description: string;
+  memberCount: number;
+  /** Roblox user ID of the owner, if the group has one */
+  ownerId?: number;
+}
+
+export interface GroupMember {
+  userId: number;
+  roleId: number;
+  /** when they joined (unix ms), if Roblox says */
+  joinedAt?: number;
 }
 
 const lastNumber = (s: string | undefined): number => {
@@ -54,6 +79,8 @@ const lastNumber = (s: string | undefined): number => {
 export class GroupsClient {
   private readonly rankCache = new TtlCache<number, UserRank[]>(5 * 60_000, 2000);
   private readonly rolesCache = new TtlCache<number, GroupRole[]>(30 * 60_000, 20);
+  private readonly groupCache = new TtlCache<number, GroupInfo>(10 * 60_000, 50);
+  private readonly iconCache = new TtlCache<number, string | null>(60 * 60_000, 100);
 
   constructor(private readonly http: RobloxHttp) {}
 
@@ -129,6 +156,71 @@ export class GroupsClient {
       if (!pageToken) break;
     }
     return ids.slice(0, max);
+  }
+
+  /** Name, description and member count (Open Cloud, cached 10 minutes). */
+  async getGroup(groupId: number): Promise<GroupInfo> {
+    return this.groupCache.getOrLoad(groupId, async () => {
+      const res = await this.http.get<CloudGroup>(`${OPEN_CLOUD}/cloud/v2/groups/${groupId}`, { auth: true });
+      const g = res.data ?? {};
+      return {
+        id: groupId,
+        name: g.displayName ?? `Group ${groupId}`,
+        description: g.description ?? '',
+        memberCount: g.memberCount ?? 0,
+        ownerId: g.owner ? lastNumber(g.owner) || undefined : undefined,
+      };
+    });
+  }
+
+  /** One page of members, optionally only one role. Pass the returned token to get the next page. */
+  async listMembers(groupId: number, opts: { roleId?: number; pageToken?: string; pageSize?: number } = {}): Promise<{ members: GroupMember[]; nextPageToken?: string }> {
+    const res = await this.http.get<CloudMemberships>(`${OPEN_CLOUD}/cloud/v2/groups/${groupId}/memberships`, {
+      auth: true,
+      query: {
+        maxPageSize: Math.min(100, opts.pageSize ?? 50),
+        pageToken: opts.pageToken,
+        filter: opts.roleId ? `role == 'groups/${groupId}/roles/${opts.roleId}'` : undefined,
+      },
+    });
+    const members = (res.data?.groupMemberships ?? [])
+      .map((m) => {
+        const t = m.createTime ? Date.parse(m.createTime) : NaN;
+        return { userId: lastNumber(m.user), roleId: lastNumber(m.role), joinedAt: Number.isFinite(t) ? t : undefined };
+      })
+      .filter((m) => m.userId > 0);
+    return { members, nextPageToken: res.data?.nextPageToken || undefined };
+  }
+
+  /** Group emblem pictures (public thumbnails API, no key sent). */
+  async icons(groupIds: number[]): Promise<Map<number, string>> {
+    const out = new Map<number, string>();
+    const need = [...new Set(groupIds)].filter((id) => {
+      const hit = this.iconCache.get(id);
+      if (hit) out.set(id, hit);
+      return hit === undefined;
+    });
+    if (!need.length) return out;
+    try {
+      const res = await this.http.get<{ data?: { targetId?: number; state?: string; imageUrl?: string }[] }>('https://thumbnails.roblox.com/v1/groups/icons', {
+        query: { groupIds: need.join(','), size: '150x150', format: 'Png', isCircular: 'false' },
+      });
+      for (const t of res.data?.data ?? []) {
+        if (!t.targetId) continue;
+        const url = t.state === 'Completed' && t.imageUrl ? t.imageUrl : null;
+        this.iconCache.set(t.targetId, url);
+        if (url) out.set(t.targetId, url);
+      }
+    } catch {
+      // pictures are optional
+    }
+    return out;
+  }
+
+  /** Forget cached roles and info for a group (after its ranks change). */
+  forgetGroup(groupId: number): void {
+    this.rolesCache.delete(groupId);
+    this.groupCache.delete(groupId);
   }
 
   /** Change a member's role (promotion / demotion). Throws if they aren't in the group. */

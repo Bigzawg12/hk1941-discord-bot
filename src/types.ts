@@ -17,6 +17,7 @@ import type { Tier } from './permissions/tiers.js';
 import type { PanelStore } from './posts/panelStore.js';
 import type { PostStore } from './posts/store.js';
 import type { AdminLogArchive } from './game/adminLogArchive.js';
+import type { DivisionStore } from './game/divisions.js';
 import type { PromotionLog } from './game/promotions.js';
 import type { GlobalData } from './roblox/globalData.js';
 import type { GroupsClient } from './roblox/groups.js';
@@ -50,6 +51,8 @@ export interface Services {
   adminLog: AdminLogArchive;
   /** rank changes made through the bot */
   promotionLog: PromotionLog;
+  /** divisions (Roblox groups) shown on the dashboard, besides the army group */
+  divisions: DivisionStore;
   /** filled in by the loader */
   commands: Map<string, Command>;
 }

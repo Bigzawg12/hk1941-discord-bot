@@ -209,6 +209,7 @@ export async function changeRank(
   const user = await services.users.getById(opts.userId).catch(() => null);
   await services.groups.setRole(group, opts.userId, to.id);
   rosterFor(services).forget();
+  services.groups.forgetGroup(group); // member counts changed
   const reason = opts.reason?.trim().slice(0, 200);
   await services.promotionLog
     .add({ t: Date.now(), groupId: group, userId: opts.userId, name: user?.name ?? String(opts.userId), from: from.roleName, fromRank: from.rank, to: to.name, toRank: to.rank, by: opts.audit.actorName, reason })
