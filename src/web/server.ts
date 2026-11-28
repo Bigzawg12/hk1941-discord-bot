@@ -61,6 +61,7 @@ import {
 import { AccessStore, checkAccess, Level, LEVEL_HINTS, LEVEL_NAMES, levelNeeded, type AccessCheck, type AccessSettings } from './access.js';
 import { discordMarkdown } from './markdown.js';
 import type { StoredAudit } from '../discord/audit.js';
+import { matchRanksToRoles } from '../linking/autoBind.js';
 import { DiscordOAuth, OAuthError, randomState } from './oauth.js';
 import { sameToken, SessionStore, type Session } from './session.js';
 
@@ -709,6 +710,55 @@ export function createDashboard(deps: DashboardDeps) {
     });
   }
 
+  /** "Bind ranks by name": pick a group, preview the matches, then apply. */
+  async function autoBindCard(r: Req, guild: Guild, hidden: (action: string) => Html): Promise<Html> {
+    const views = (await groupViews()).filter((g) => canSee(r, g.groupId));
+    const linked = views.find((g) => g.entry?.guildId === guild.id);
+    const want = Number(r.url.searchParams.get('auto'));
+    const groupId = views.some((g) => g.groupId === want) ? want : (linked?.groupId ?? services.config.roblox.armyGroupId);
+    const create = r.url.searchParams.get('create') === '1';
+    const picker = html`<form method="get" action="/servers/${guild.id}" class="row"><input type="hidden" name="tab" value="binds">
+      ${field('Group', 'auto', select('auto', views.map((g) => ({ value: String(g.groupId), label: g.name })), String(groupId), { none: null }))}
+      <label class="check"><input type="checkbox" name="create" value="1"${create ? new Html(' checked') : ''}> Create Discord roles for ranks with no matching role</label>
+      <button class="secondary">Preview</button></form>`;
+    if (!r.url.searchParams.has('auto')) {
+      return card('Bind ranks by name', html`<p class="muted">Matches each rank in a Roblox group to the Discord role with the same name (Corporal → @Corporal, or a role like “Cpl | Corporal”), so you don’t have to add binds one by one. You see what it will do before anything changes.</p>${picker}`);
+    }
+    let plan: AutoBindRow[] = [];
+    let error = '';
+    try {
+      plan = await planAutoBind(guild, groupId, create);
+    } catch (err) {
+      error = err instanceof Error ? err.message : String(err);
+    }
+    const STATUS: Record<AutoBindRow['status'], [string, Tone]> = {
+      bind: ['Will bind', 'ok'],
+      bound: ['Already bound', 'muted'],
+      create: ['Will create the role and bind it', 'info'],
+      missing: ['No matching role', 'warn'],
+      staff: ['Skipped: that’s a staff role', 'warn'],
+      'too-high': ['Skipped: role is above the bot’s role', 'bad'],
+    };
+    const todo = plan.filter((x) => x.status === 'bind' || x.status === 'create').length;
+    return card(
+      'Bind ranks by name',
+      html`${picker}
+      ${
+        error
+          ? html`<p class="flash bad">Couldn’t read that group’s ranks: ${error.slice(0, 160)}</p>`
+          : html`<div class="table-wrap autobind"><table><thead><tr><th class="num">Rank</th><th>Roblox rank</th><th>Discord role</th><th>What happens</th></tr></thead><tbody>
+            ${plan.map((x) => html`<tr><td class="num">${x.rank}</td><td>${x.rankName}</td><td>${x.roleName ? `@${x.roleName}` : x.status === 'create' ? html`<span class="muted">@${x.rankName} (new)</span>` : html`<span class="muted">–</span>`}</td><td>${badge(STATUS[x.status][0], STATUS[x.status][1])}</td></tr>`)}
+            </tbody></table></div>
+            ${
+              todo
+                ? html`<form method="post" class="btn-row autobind-go">${hidden('autobind')}<input type="hidden" name="groupId" value="${groupId}"><input type="hidden" name="create" value="${create ? '1' : ''}">
+                  <button>Bind ${todo} rank${todo === 1 ? '' : 's'}</button><span class="muted">Members get these roles the next time they verify, press Update, or are promoted.</span></form>`
+                : html`<p class="muted">Nothing to do for this group.</p>`
+            }`
+      }`,
+    );
+  }
+
   async function serverPage(r: Req, guild: Guild): Promise<string> {
     const s = await services.guilds.get(guild.id);
     const tab: ServerTab = isTab(r.url.searchParams.get('tab')) ? (r.url.searchParams.get('tab') as ServerTab) : 'channels';
@@ -753,12 +803,13 @@ export function createDashboard(deps: DashboardDeps) {
         armyRanks = [];
       }
       const rankName = (n: number) => armyRanks.find((x) => x.rank === n)?.name;
+      const groupNames = new Map((await groupViews()).map((g) => [g.groupId, g.name]));
       content = html`${card(
         'Rank binds',
         (s.rankBinds ?? []).length
           ? html`<div class="table-wrap"><table><thead><tr><th>Role</th><th>Ranks</th><th>Group</th><th></th></tr></thead><tbody>
             ${(s.rankBinds ?? []).map(
-              (b) => html`<tr><td>@${roleName(b.roleId)}</td><td>${b.min === b.max ? `${b.min}` : `${b.min}–${b.max}`}${b.groupId === army && rankName(b.min) ? html` <small class="muted">${rankName(b.min)}${b.max !== b.min && rankName(b.max) ? ` – ${rankName(b.max)}` : ''}</small>` : ''}</td><td>${b.groupId === army ? 'Army' : b.groupId}</td>
+              (b) => html`<tr><td>@${roleName(b.roleId)}</td><td>${b.min === b.max ? `${b.min}` : `${b.min}–${b.max}`}${b.groupId === army && rankName(b.min) ? html` <small class="muted">${rankName(b.min)}${b.max !== b.min && rankName(b.max) ? ` – ${rankName(b.max)}` : ''}</small>` : ''}</td><td>${b.groupId === army ? 'Army' : (groupNames.get(b.groupId) ?? b.groupId)}</td>
               <td><form method="post">${hidden('unbind')}<input type="hidden" name="roleId" value="${b.roleId}"><input type="hidden" name="groupId" value="${b.groupId}"><button class="secondary sm">Remove</button></form></td></tr>`,
             )}</tbody></table></div>`
           : empty('No binds yet', 'Add one below to give a role to everyone in a range of Roblox ranks.', 'users'),
@@ -774,7 +825,8 @@ export function createDashboard(deps: DashboardDeps) {
           <div class="field narrow"><label for="groupId">Group ID</label><input id="groupId" name="groupId" type="number" min="1" value="${army}"></div>
           <button>Add bind</button></form>
         ${armyRanks.length ? html`<p class="hint">Army ranks: ${armyRanks.map((x) => `${x.rank} ${x.name}`).join(' · ')}</p>` : ''}`,
-      )}`;
+      )}
+      ${await autoBindCard(r, guild, hidden)}`;
     } else if (tab === 'staff') {
       const entries = Object.entries(s.staffRoles).sort((a, b) => b[1] - a[1]);
       content = html`${card(
@@ -811,6 +863,34 @@ export function createDashboard(deps: DashboardDeps) {
       body: html`<header class="page-head"><div class="server-top">${guildIcon(guild, 52)}<div><h1>${guild.name}</h1><p class="sub">${guild.memberCount.toLocaleString('en-GB')} members · <a href="/servers">All servers</a>${waiting ? html` · <a href="/approvals">${waiting} waiting for approval</a>` : ''}</p></div></div></header>
       <nav class="tabs" aria-label="Server settings">${SERVER_TABS.map(([k, label]) => html`<a href="/servers/${guild.id}?tab=${k}"${k === tab ? new Html(' aria-current="page"') : ''}>${label}</a>`)}</nav>
       ${content}`,
+    });
+  }
+
+  // ---------- bind ranks by name ----------
+
+  interface AutoBindRow {
+    rank: number;
+    rankName: string;
+    roleId?: string;
+    roleName?: string;
+    status: 'bind' | 'bound' | 'create' | 'missing' | 'staff' | 'too-high';
+  }
+
+  /** What "Bind ranks by name" would do in this server for this group. */
+  async function planAutoBind(guild: Guild, groupId: number, create: boolean): Promise<AutoBindRow[]> {
+    const ranks = assignable(await services.groups.listRoles(groupId)).map((x) => ({ rank: x.rank, name: x.name }));
+    const settings = await services.guilds.get(guild.id);
+    const candidates = [...guild.roles.cache.values()].filter((x) => x.id !== guild.id && !x.managed).map((x) => ({ id: x.id, name: x.name }));
+    const botTop = guild.members?.me?.roles?.highest?.position ?? Number.MAX_SAFE_INTEGER;
+    return matchRanksToRoles(ranks, candidates).map((m) => {
+      const base = { rank: m.rank, rankName: m.rankName };
+      if (!m.role) return { ...base, status: create ? 'create' : 'missing' } as AutoBindRow;
+      const role = guild.roles.cache.get(m.role.id);
+      const row = { ...base, roleId: m.role.id, roleName: m.role.name };
+      if (settings.staffRoles[m.role.id]) return { ...row, status: 'staff' } as AutoBindRow;
+      if (role && 'position' in role && role.position >= botTop) return { ...row, status: 'too-high' } as AutoBindRow;
+      const bound = (settings.rankBinds ?? []).some((b) => b.roleId === m.role!.id && b.groupId === groupId && b.min === m.rank && b.max === m.rank);
+      return { ...row, status: bound ? 'bound' : 'bind' } as AutoBindRow;
     });
   }
 
@@ -2197,6 +2277,30 @@ export function createDashboard(deps: DashboardDeps) {
         });
         await audit(r, 'Rank bind added', `<@&${roleId}> ← ranks ${min}-${max} in group ${groupId}`, guild.id);
         flash(r.session, 'ok', 'Bind added.');
+        return;
+      }
+      case 'autobind': {
+        const groupId = Number(f.groupId);
+        if (!(await groupViews()).some((g) => g.groupId === groupId && canSee(r, g.groupId))) throw new UserFacingError('Pick one of the groups on the dashboard.');
+        const plan = await planAutoBind(guild, groupId, f.create === '1');
+        let created = 0;
+        const add: { roleId: string; rank: number }[] = [];
+        for (const x of plan) {
+          if (x.status === 'bind' && x.roleId) add.push({ roleId: x.roleId, rank: x.rank });
+          if (x.status === 'create') {
+            const role = await guild.roles.create({ name: x.rankName.slice(0, 100), mentionable: false, hoist: false, permissions: [], reason: `Rank bind for ${x.rankName} (dashboard, ${by})` }).catch((err: unknown) => {
+              throw new UserFacingError(`Couldn’t create @${x.rankName}: ${err instanceof Error ? err.message : String(err)}. The bot needs Manage Roles.`);
+            });
+            created++;
+            add.push({ roleId: role.id, rank: x.rank });
+          }
+        }
+        await set((s) => {
+          const keep = (s.rankBinds ?? []).filter((b) => !add.some((a) => a.roleId === b.roleId && b.groupId === groupId));
+          s.rankBinds = [...keep, ...add.map((a) => ({ roleId: a.roleId, groupId, min: a.rank, max: a.rank }))];
+        });
+        await audit(r, 'Rank binds by name', `${add.length} ranks in group ${groupId} bound${created ? `, ${created} roles created` : ''}`, guild.id);
+        flash(r.session, 'ok', `Bound ${add.length} rank${add.length === 1 ? '' : 's'}${created ? ` and created ${created} role${created === 1 ? '' : 's'}` : ''}. Members get them the next time they verify, press Update, or are promoted.`);
         return;
       }
       case 'unbind': {

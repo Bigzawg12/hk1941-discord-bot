@@ -1,0 +1,56 @@
+/**
+ * Matching Roblox group ranks to Discord roles by name, for "Bind ranks by name" on the dashboard.
+ * First exact names ("Corporal" = @Corporal, ignoring case and punctuation), then a role whose name
+ * contains the rank's words ("Cpl | Corporal") when only one role does. Each role is used once,
+ * longer rank names first, so "Master Corporal" isn't taken by "Corporal".
+ */
+
+export interface RankToBind {
+  rank: number;
+  name: string;
+}
+
+export interface RoleCandidate {
+  id: string;
+  name: string;
+}
+
+export interface RankMatch {
+  rank: number;
+  rankName: string;
+  role?: RoleCandidate;
+  how?: 'exact' | 'contains';
+}
+
+export const normName = (s: string) =>
+  s
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+
+export function matchRanksToRoles(ranks: RankToBind[], roles: RoleCandidate[]): RankMatch[] {
+  const used = new Set<string>();
+  const out = new Map<number, RankMatch>();
+  const byLength = [...ranks].sort((a, b) => normName(b.name).length - normName(a.name).length);
+  // exact names
+  for (const r of byLength) {
+    const role = roles.find((x) => !used.has(x.id) && normName(x.name) === normName(r.name));
+    if (role) {
+      used.add(role.id);
+      out.set(r.rank, { rank: r.rank, rankName: r.name, role, how: 'exact' });
+    }
+  }
+  // a role that contains the rank's words, when only one does
+  const rankNames = new Set(ranks.map((r) => normName(r.name)));
+  for (const r of byLength) {
+    if (out.has(r.rank)) continue;
+    const want = ` ${normName(r.name)} `;
+    if (want.trim().length < 3) continue;
+    const found = roles.filter((x) => !used.has(x.id) && !rankNames.has(normName(x.name)) && ` ${normName(x.name)} `.includes(want));
+    if (found.length === 1) {
+      used.add(found[0]!.id);
+      out.set(r.rank, { rank: r.rank, rankName: r.name, role: found[0], how: 'contains' });
+    }
+  }
+  return ranks.map((r) => out.get(r.rank) ?? { rank: r.rank, rankName: r.name });
+}

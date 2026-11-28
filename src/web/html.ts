@@ -438,6 +438,8 @@ input.num{width:110px;min-height:32px;padding:4px 8px}
 .inline-rank select{min-height:30px;padding:3px 8px;width:auto;max-width:220px;font-size:.85rem}
 .chips a small{opacity:.7;margin-left:2px}
 /* groups */
+.autobind{margin:14px 0;border:1px solid var(--line);border-radius:var(--r-sm)}
+.autobind-go{margin-top:4px}
 .activity-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap}
 .answers{margin:10px 0 0;display:grid;gap:4px}
 .answers dt{font-size:.84rem;font-weight:500;color:var(--muted);margin-top:8px}

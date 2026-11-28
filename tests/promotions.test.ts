@@ -598,3 +598,57 @@ describe('limiting what people see to their own groups', () => {
     expect((await lt.req(`/groups/${DIV}`)).status).toBe(403);
   });
 });
+
+describe('binding ranks to Discord roles by name', () => {
+  it('matches exact names first, then a role that contains the rank, never the same role twice', async () => {
+    const { matchRanksToRoles } = await import('../src/linking/autoBind.js');
+    const out = matchRanksToRoles(
+      [
+        { rank: 3, name: 'Corporal' },
+        { rank: 4, name: 'Master Corporal' },
+        { rank: 5, name: 'Sergeant' },
+        { rank: 9, name: 'Lieutenant' },
+      ],
+      [
+        { id: 'a', name: 'Master Corporal' },
+        { id: 'b', name: 'Cpl | Corporal' },
+        { id: 'c', name: 'SGT – Sergeant' },
+        { id: 'd', name: 'Sergeant Major' },
+      ],
+    );
+    expect(out.map((m) => [m.rank, m.role?.id, m.how])).toEqual([
+      [3, 'b', 'contains'],
+      [4, 'a', 'exact'],
+      [5, undefined, undefined], // two roles contain "sergeant": too unsure, left for you
+      [9, undefined, undefined],
+    ]);
+  });
+
+  it('previews on the Rank binds tab, then binds and creates the missing roles', async () => {
+    const { req, post, services, fc } = await start();
+    const guild = fc.client.guilds.cache.get(IDS.guild) as {
+      roles: { cache: Map<string, { id: string; name: string; position: number; managed: boolean }>; create?: unknown };
+    };
+    const names: Record<string, string> = { '700000000000000001': 'Verified', '700000000000000002': 'Private', '700000000000000003': 'Cpl | Corporal', '700000000000000004': 'Lieutenant' };
+    for (const [id, name] of Object.entries(names)) guild.roles.cache.get(id)!.name = name;
+    guild.roles.create = async ({ name }: { name: string }) => {
+      const role = { id: '700000000000000099', name, position: 1, managed: false };
+      guild.roles.cache.set(role.id, role);
+      return role;
+    };
+    const preview = await (await req(`/servers/${IDS.guild}?tab=binds&auto=${ARMY}&create=1`)).text();
+    expect(preview).toContain('@Cpl | Corporal');
+    expect(preview).toContain('Will create the role and bind it');
+    expect(preview).toContain('Bind 4 ranks');
+    expect(preview).not.toContain('<td>Developer</td>'); // never offered
+    await post(`/servers/${IDS.guild}`, { action: 'autobind', tab: 'binds', groupId: String(ARMY), create: '1' });
+    const binds = (await services.guilds.get(IDS.guild)).rankBinds ?? [];
+    expect(binds.map((b) => [b.roleId, b.min]).sort()).toEqual([
+      ['700000000000000002', 2],
+      ['700000000000000003', 3],
+      ['700000000000000004', 9],
+      ['700000000000000099', 1],
+    ]);
+    expect(await (await req(`/servers/${IDS.guild}?tab=binds&auto=${ARMY}`)).text()).toContain('Nothing to do for this group');
+  });
+});
