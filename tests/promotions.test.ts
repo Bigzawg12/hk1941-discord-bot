@@ -12,6 +12,8 @@ import { fakeGuild, VERIFIED } from './helpers/guild.js';
 import { json, type Call } from './helpers/mockFetch.js';
 
 const ADMIN = '123456789012345678';
+const EVENT_START = Math.floor(Date.now() / 1000) + 3 * 3600;
+const EVENTS = [{ id: '4821', title: 'Defence of the Gap', detail: 'Muster at HQ', start: EVENT_START, host: 'Maj_X' }];
 const ARMY = 409406376;
 const ROLES = [
   { id: '1', displayName: 'Recruit', rank: 1 },
@@ -33,7 +35,7 @@ afterEach(async () => {
   await Promise.all(open.splice(0).map((d) => d.close()));
 });
 
-async function start(over: { bannedUntil?: number; patchStatus?: number } = {}) {
+async function start(over: { bannedUntil?: number; patchStatus?: number; env?: Record<string, string> } = {}) {
   const patches: Call[] = [];
   const writes: Call[] = [];
   const published: Call[] = [];
@@ -78,13 +80,14 @@ async function start(over: { bannedUntil?: number; patchStatus?: number } = {}) 
           if (key === 'u99') return json(profileStoreValue(SAMPLE_PROFILE));
           if (key === 'HK1941_AdminLog/recent') return json([{ t: 1_795_700_000, by: 'Sgt_Mod', text: ';kick Pte_Target spamming the radio' }]);
           if (key === 'HK1941_Staff/list') return json({});
+          if (key === 'HK1941_Events/list') return json(EVENTS);
           if (key === 'HK1941_Config/service' && saved) return json(saved);
           if (key === 'HK1941_Bans/u99' && over.bannedUntil !== undefined) return json({ untilT: over.bannedUntil, reason: 'Exploiting', by: 'Maj_X' });
           return json({ error: 'NOT_FOUND' }, 404);
         },
       ],
     ],
-    { DISCORD_CLIENT_SECRET: 's', SESSION_SECRET: 'x'.repeat(40), DASHBOARD_ADMIN_IDS: ADMIN, OWNER_DISCORD_IDS: IDS.otherUser },
+    { DISCORD_CLIENT_SECRET: 's', SESSION_SECRET: 'x'.repeat(40), DASHBOARD_ADMIN_IDS: ADMIN, OWNER_DISCORD_IDS: IDS.otherUser, ...over.env },
   );
   const fc = fakeClient();
   fc.client.guilds.cache.set(IDS.guild, fakeGuild().guild);
@@ -624,6 +627,34 @@ describe('binding ranks to Discord roles by name', () => {
     ]);
   });
 
+  it('treats company letters, phonetic names and army abbreviations alike', async () => {
+    const { matchRanksToRoles, normName } = await import('../src/linking/autoBind.js');
+    expect(normName('C Coy')).toBe(normName('Charlie Company'));
+    expect(normName('Cpl')).toBe('corporal');
+    expect(normName('X-Ray Company')).toBe('x company');
+    const out = matchRanksToRoles(
+      [
+        { rank: 10, name: 'A Company' },
+        { rank: 11, name: 'B Coy' },
+        { rank: 12, name: 'C' },
+        { rank: 3, name: 'Cpl' },
+      ],
+      [
+        { id: 'able', name: 'Able Company' },
+        { id: 'baker', name: 'Baker Company' },
+        { id: 'charlie', name: 'Charlie Company' },
+        { id: 'cpl', name: 'Corporal' },
+        { id: 'chief', name: 'Chief of Army Staff' },
+      ],
+    );
+    expect(out.map((m) => [m.rankName, m.role?.id])).toEqual([
+      ['A Company', 'able'],
+      ['B Coy', 'baker'],
+      ['C', 'charlie'],
+      ['Cpl', 'cpl'],
+    ]);
+  });
+
   it('previews on the Rank binds tab, then binds and creates the missing roles', async () => {
     const { req, post, services, fc } = await start();
     const guild = fc.client.guilds.cache.get(IDS.guild) as {
@@ -637,18 +668,99 @@ describe('binding ranks to Discord roles by name', () => {
       return role;
     };
     const preview = await (await req(`/servers/${IDS.guild}?tab=binds&auto=${ARMY}&create=1`)).text();
-    expect(preview).toContain('@Cpl | Corporal');
-    expect(preview).toContain('Will create the role and bind it');
-    expect(preview).toContain('Bind 4 ranks');
+    expect(preview).toContain('<option value="700000000000000003" selected>@Cpl | Corporal</option>');
+    expect(preview).toContain('<option value="create" selected>+ Create @Recruit</option>');
+    expect(preview).toContain('No role: will create one');
     expect(preview).not.toContain('<td>Developer</td>'); // never offered
-    await post(`/servers/${IDS.guild}`, { action: 'autobind', tab: 'binds', groupId: String(ARMY), create: '1' });
+    // save, changing one row by hand: Lieutenant goes to @Verified instead
+    await post(`/servers/${IDS.guild}`, {
+      action: 'autobind',
+      tab: 'binds',
+      groupId: String(ARMY),
+      r_1: 'create',
+      r_2: '700000000000000002',
+      r_3: '700000000000000003',
+      r_9: '700000000000000001',
+    });
     const binds = (await services.guilds.get(IDS.guild)).rankBinds ?? [];
     expect(binds.map((b) => [b.roleId, b.min]).sort()).toEqual([
+      ['700000000000000001', 9],
       ['700000000000000002', 2],
       ['700000000000000003', 3],
-      ['700000000000000004', 9],
       ['700000000000000099', 1],
     ]);
-    expect(await (await req(`/servers/${IDS.guild}?tab=binds&auto=${ARMY}`)).text()).toContain('Nothing to do for this group');
+    expect(await (await req(`/servers/${IDS.guild}?tab=binds&auto=${ARMY}`)).text()).toContain('Already bound');
+  });
+});
+
+describe('events on the dashboard', () => {
+  it('shows the calendar and list, and schedules and cancels through the bridge', async () => {
+    const { req, post, services, published } = await start({ env: { BRIDGE_ACKS: 'false' } });
+    const page = await (await req('/events')).text();
+    expect(page).toContain('Defence of the Gap');
+    expect(page).toContain('Muster at HQ');
+    expect(page).toContain('class="cal-event"');
+    // needs a linked Roblox account to post under
+    await post('/events', { action: 'schedule', title: 'Night patrol', date: '2099-01-01', time: '20:00' });
+    expect(await (await req('/events')).text()).toContain('Link your Roblox account first');
+    await services.links.linkVerified(ADMIN, { id: 42, name: 'Maj_Owner' }, 'manual');
+    const tomorrow = new Date(Date.now() + 86400_000).toISOString().slice(0, 10);
+    await post('/events', { action: 'schedule', title: 'Night patrol', detail: 'Bring lamps', date: tomorrow, time: '20:00' });
+    const sent = JSON.stringify(published.at(-1)!.body);
+    expect(sent).toContain('event_add');
+    expect(sent).toContain('Night patrol');
+    await post('/events', { action: 'cancel', id: '4821' });
+    expect(JSON.stringify(published.at(-1)!.body)).toContain('event_cancel');
+    const audit = await services.audit.list();
+    expect(audit.map((e) => e.action)).toEqual(expect.arrayContaining(['Schedule event', 'Cancel event #4821']));
+  });
+
+  it('Viewers see it but can’t schedule', async () => {
+    const { as, post, services } = await start();
+    const OFFICER = '777000000000000001';
+    await services.links.linkVerified(OFFICER, { id: 42, name: 'Lt_Officer' }, 'manual');
+    await post('/access', { action: 'set', discordId: OFFICER, level: '1' });
+    const v = await as(OFFICER);
+    const page = await (await v.req('/events')).text();
+    expect(page).toContain('Defence of the Gap');
+    expect(page).not.toContain('Schedule an event');
+    expect((await v.post('/events', { action: 'cancel', id: '4821' })).status).toBe(403);
+  });
+});
+
+describe('roles that cover several ranks', () => {
+  it('suggests @Officer for the officer ranks and @Personnel for the enlisted ones, and saves them as ranges', async () => {
+    const { req, post, services, fc } = await start();
+    const guild = fc.client.guilds.cache.get(IDS.guild) as { roles: { cache: Map<string, { id: string; name: string; position: number; managed: boolean }> } };
+    guild.roles.cache.set('700000000000000005', { id: '700000000000000005', name: 'Officer', position: 9, managed: false });
+    guild.roles.cache.set('700000000000000006', { id: '700000000000000006', name: 'Personnel', position: 10, managed: false });
+    const page = await (await req(`/servers/${IDS.guild}?tab=binds&auto=${ARMY}`)).text();
+    const rows = page.slice(page.indexOf('Roles for several ranks'));
+    // officers: above the points ladder (Lieutenant, 9); enlisted: Recruit (1) to Corporal (3) in this test group
+    expect(rows).toMatch(/name="c_0_role"[\s\S]*?value="700000000000000005" selected/);
+    expect(rows).toMatch(/name="c_0_min"[\s\S]*?value="9" selected/);
+    expect(rows).toMatch(/name="c_1_role"[\s\S]*?value="700000000000000006" selected/);
+    expect(rows).toMatch(/name="c_1_max"[\s\S]*?value="3" selected/);
+    await post(`/servers/${IDS.guild}`, {
+      action: 'autobind',
+      tab: 'binds',
+      groupId: String(ARMY),
+      c_0_role: '700000000000000005',
+      c_0_min: '9',
+      c_0_max: '9',
+      c_1_role: '700000000000000006',
+      c_1_min: '1',
+      c_1_max: '3',
+    });
+    const binds = (await services.guilds.get(IDS.guild)).rankBinds ?? [];
+    expect(binds).toEqual(
+      expect.arrayContaining([
+        { roleId: '700000000000000005', groupId: ARMY, min: 9, max: 9 },
+        { roleId: '700000000000000006', groupId: ARMY, min: 1, max: 3 },
+      ]),
+    );
+    // next time the rows show what's bound
+    const again = await (await req(`/servers/${IDS.guild}?tab=binds&auto=${ARMY}`)).text();
+    expect(again.slice(again.indexOf('Roles for several ranks'))).toMatch(/name="c_1_min"[\s\S]*?value="1" selected/);
   });
 });

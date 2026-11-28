@@ -1,8 +1,10 @@
 /**
  * Matching Roblox group ranks to Discord roles by name, for "Bind ranks by name" on the dashboard.
- * First exact names ("Corporal" = @Corporal, ignoring case and punctuation), then a role whose name
- * contains the rank's words ("Cpl | Corporal") when only one role does. Each role is used once,
- * longer rank names first, so "Master Corporal" isn't taken by "Corporal".
+ * Names are compared in a plain form: lower case, no punctuation, company letters and their
+ * WWII phonetic words treated alike ("C", "C Coy", "Charlie Company"), and common army
+ * abbreviations spelled out ("Cpl" = "Corporal"). First exact matches, then a role whose name
+ * contains the rank's words when only one role does. Each role is used once, longer rank names
+ * first, so "Master Corporal" isn't taken by "Corporal".
  */
 
 export interface RankToBind {
@@ -22,11 +24,35 @@ export interface RankMatch {
   how?: 'exact' | 'contains';
 }
 
-export const normName = (s: string) =>
-  s
+/** The 1941 Joint Army/Navy phonetic alphabet (Able, Baker, Charlie…), to the letter. */
+const PHONETIC: Record<string, string> = {
+  able: 'a', baker: 'b', charlie: 'c', dog: 'd', easy: 'e', fox: 'f', george: 'g', how: 'h', item: 'i',
+  jig: 'j', king: 'k', love: 'l', mike: 'm', nan: 'n', oboe: 'o', peter: 'p', queen: 'q', roger: 'r',
+  sugar: 's', tare: 't', uncle: 'u', victor: 'v', william: 'w', xray: 'x', yoke: 'y', zebra: 'z',
+};
+
+/** Army abbreviations, spelled out. */
+const ABBREV: Record<string, string> = {
+  pte: 'private', pvt: 'private', lcpl: 'lance corporal', cpl: 'corporal', mcpl: 'master corporal', sgt: 'sergeant',
+  ssgt: 'staff sergeant', wo: 'warrant officer', mwo: 'master warrant officer', cwo: 'chief warrant officer',
+  '2lt': 'second lieutenant', lt: 'lieutenant', capt: 'captain', maj: 'major', lcol: 'lieutenant colonel',
+  ltcol: 'lieutenant colonel', col: 'colonel', brig: 'brigadier', gen: 'general', coy: 'company', bn: 'battalion',
+  regt: 'regiment', hq: 'headquarters', cdr: 'commander', cmdr: 'commander',
+};
+
+export function normName(s: string): string {
+  const words = s
     .toLowerCase()
+    .replace(/x-ray/g, 'xray')
     .replace(/[^a-z0-9]+/g, ' ')
-    .trim();
+    .trim()
+    .split(' ')
+    .filter(Boolean);
+  return words
+    .flatMap((w) => (ABBREV[w] ?? w).split(' '))
+    .map((w) => PHONETIC[w] ?? w)
+    .join(' ');
+}
 
 export function matchRanksToRoles(ranks: RankToBind[], roles: RoleCandidate[]): RankMatch[] {
   const used = new Set<string>();
@@ -45,7 +71,7 @@ export function matchRanksToRoles(ranks: RankToBind[], roles: RoleCandidate[]): 
   for (const r of byLength) {
     if (out.has(r.rank)) continue;
     const want = ` ${normName(r.name)} `;
-    if (want.trim().length < 3) continue;
+    if (!want.trim()) continue;
     const found = roles.filter((x) => !used.has(x.id) && !rankNames.has(normName(x.name)) && ` ${normName(x.name)} `.includes(want));
     if (found.length === 1) {
       used.add(found[0]!.id);

@@ -145,10 +145,11 @@ ${
   <a class="brand" href="/"><img src="/static/logo.png" alt="" width="30" height="30"><span><b>Hong Kong 1941</b><small>Staff dashboard</small></span></a>
   <nav class="nav" aria-label="Main">
     ${item('/', 'Overview', 'home')}
-    <div class="nav-section">Personnel</div>
+    <div class="nav-section">Unit</div>
     ${item('/promotions', 'Promotions', 'promotions')}
     ${item('/members', 'Members', 'members')}
     ${item('/groups', 'Groups', 'groups')}
+    ${item('/events', 'Events', 'events')}
     ${lvl >= 3 ? html`<div class="nav-section">Discord</div>` : ''}
     ${item('/approvals', 'Approvals', 'approvals', opts.counts?.approvals, 3)}
     ${item('/panels', 'Panels', 'panels', undefined, 3)}
@@ -437,9 +438,28 @@ input.num{width:110px;min-height:32px;padding:4px 8px}
 .tabs .count{margin-left:6px}
 .inline-rank select{min-height:30px;padding:3px 8px;width:auto;max-width:220px;font-size:.85rem}
 .chips a small{opacity:.7;margin-left:2px}
+/* events */
+.events-grid{grid-template-columns:minmax(0,1.5fr) minmax(0,1fr)}
+@media (max-width:1100px){.events-grid{grid-template-columns:minmax(0,1fr)}}
+.cal{display:grid;grid-template-columns:repeat(7,minmax(0,1fr));border-top:1px solid var(--line);border-left:1px solid var(--line)}
+.cal-head{font-size:.78rem;font-weight:500;color:var(--muted);padding:6px 8px;border-right:1px solid var(--line);border-bottom:1px solid var(--line);background:var(--panel-2)}
+.cal-cell{min-height:92px;padding:6px 6px 8px;border-right:1px solid var(--line);border-bottom:1px solid var(--line);display:flex;flex-direction:column;gap:3px;min-width:0}
+.cal-cell.empty{background:var(--panel-2)}
+.cal-cell.past .cal-day{color:var(--muted)}
+.cal-day{font-size:.8rem;font-weight:600;font-variant-numeric:tabular-nums}
+.cal-cell.today .cal-day{display:inline-grid;place-items:center;width:22px;height:22px;border-radius:50%;background:var(--accent);color:#fff}
+.cal-event{display:block;font-size:.74rem;line-height:1.3;padding:2px 5px;border-radius:4px;background:var(--panel-2);border:1px solid var(--line);color:var(--ink);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.cal-event:hover{border-color:var(--line-2);text-decoration:none}
+.cal-event span{color:var(--muted);font-variant-numeric:tabular-nums}
+.cal-more{font-size:.72rem;color:var(--muted)}
+.event-when{display:flex;flex-direction:column;min-width:112px}
+.event-when b{font-variant-numeric:tabular-nums}
+.event-when small{color:var(--muted);font-size:.76rem}
+.event-list li:target{background:var(--panel-2)}
 /* groups */
 .autobind{margin:14px 0;border:1px solid var(--line);border-radius:var(--r-sm)}
 .autobind-go{margin-top:4px}
+select.role-pick{min-height:30px;padding:3px 8px;width:auto;min-width:200px;max-width:280px;font-size:.86rem}
 .activity-head{display:flex;justify-content:space-between;align-items:center;gap:12px;margin-bottom:12px;flex-wrap:wrap}
 .answers{margin:10px 0 0;display:grid;gap:4px}
 .answers dt{font-size:.84rem;font-weight:500;color:var(--muted);margin-top:8px}

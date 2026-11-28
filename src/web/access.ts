@@ -159,5 +159,6 @@ export function levelNeeded(method: string, path: string, action?: string): Leve
   if (path === '/groups' && post) return Level.Admin; // add a group
   if (/^\/groups\/\d+$/.test(path) && post) return action === 'rank' || action === 'app-decide' || action === 'apps-settings' || action === 'activity-check' ? Level.Officer : Level.Admin;
   if (path === '/game-log' && post) return Level.Viewer; // sync now
+  if (path === '/events' && post) return Level.Officer; // schedule / cancel
   return Level.Viewer;
 }
