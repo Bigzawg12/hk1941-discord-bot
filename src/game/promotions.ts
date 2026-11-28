@@ -153,8 +153,12 @@ export function nextRole(roles: GroupRole[], rank: number): GroupRole | undefine
   return req ? roles.find((r) => r.rank === req.nextRank) : undefined;
 }
 
-/** Ranks anyone may be given here: in the group, not guest (0) and not owner (255). */
-export const assignable = (roles: GroupRole[]) => roles.filter((r) => r.rank > 0 && r.rank < 255).sort((a, b) => a.rank - b.rank);
+/** Roles that exist in the groups but are never given out (staff-only roles). */
+export const NOT_OBTAINABLE = /^\s*developers?\s*$/i;
+
+/** Ranks anyone may be given here: in the group, not guest (0), not owner (255), not Developer. */
+export const assignable = (roles: GroupRole[]) =>
+  roles.filter((r) => r.rank > 0 && r.rank < 255 && !NOT_OBTAINABLE.test(r.name)).sort((a, b) => a.rank - b.rank);
 
 /**
  * Who may change whose rank: owners anything; everyone else only people below their own army

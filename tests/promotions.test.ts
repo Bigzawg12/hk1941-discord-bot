@@ -12,6 +12,7 @@ const ROLES = [
   { id: '2', displayName: 'Private', rank: 2 },
   { id: '3', displayName: 'Corporal', rank: 3 },
   { id: '9', displayName: 'Lieutenant', rank: 9 },
+  { id: '200', displayName: 'Developer', rank: 200 },
   { id: '255', displayName: 'Owner', rank: 255 },
 ];
 const DIV = 555000111;
@@ -130,6 +131,7 @@ describe('promotions', () => {
     expect(text).toContain('Insubordination');
     expect(text).toContain(';kick Pte_Target spamming the radio');
     expect(text).toContain('Banned for good');
+    expect(text).not.toContain('200 · Developer'); // not obtainable
     expect(text).toContain('Good drill');
   });
 
@@ -152,6 +154,7 @@ describe('promotions', () => {
     await post('/members/99', { action: 'rank', roleId: '3', expectRoleId: '1' });
     expect(await (await req('/members/99')).text()).toContain('Their rank changed in the meantime');
     await post('/members/99', { action: 'rank', roleId: '255', expectRoleId: '2' });
+    await post('/members/99', { action: 'rank', roleId: '200', expectRoleId: '2' });
     expect(await (await req('/members/99')).text()).toContain('can’t be given out');
     expect(patches).toHaveLength(0);
   });
@@ -166,6 +169,8 @@ describe('groups (army and divisions)', () => {
   it('adds a division, lists its members with their rank, and changes a rank there', async () => {
     const { req, post, patches, services } = await start();
     expect(await (await req('/groups')).text()).toContain('Canadian Army 1940s');
+    await post('/groups', { action: 'add', group: '668236881' }); // the main group gets its own tag
+    expect(await (await req('/groups/668236881')).text()).toContain('Main group');
     const added = await post('/groups', { action: 'add', group: `https://www.roblox.com/groups/${DIV}/Royal-Rifles`, label: '' });
     expect(added.headers.get('location')).toBe(`/groups/${DIV}`);
     expect((await services.divisions.get(DIV))?.addedBy).toBe('The Owner');

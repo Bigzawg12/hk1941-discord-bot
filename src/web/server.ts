@@ -1158,6 +1158,8 @@ export function createDashboard(deps: DashboardDeps) {
   interface GroupView {
     groupId: number;
     isArmy: boolean;
+    /** the main Canadian group (OWNER_GROUP_ID) */
+    isMain: boolean;
     entry: DivisionEntry | null;
     info: GroupInfo | null;
     name: string;
@@ -1186,10 +1188,11 @@ export function createDashboard(deps: DashboardDeps) {
     return ids.map((id, i) => {
       const entry = byId.get(id) ?? null;
       const { info, error } = infos[i]!;
-      return { groupId: id, isArmy: id === army, entry, info, error, icon: icons.get(id), name: entry?.label || info?.name || (id === army ? 'Army group' : `Group ${id}`) };
+      return { groupId: id, isArmy: id === army, isMain: id === services.config.roblox.ownerGroupId, entry, info, error, icon: icons.get(id), name: entry?.label || info?.name || (id === army ? 'Army group' : `Group ${id}`) };
     });
   }
 
+  const groupKind = (g: GroupView) => (g.isMain ? 'Main group' : g.isArmy ? 'Army' : 'Division');
   const groupIcon = (g: GroupView, size = 44) => (g.icon ? html`<img src="${g.icon}" alt="" width="${size}" height="${size}">` : html`<span class="server-ph">${initials(g.name)}</span>`);
 
   function groupLinks(g: GroupView): Html {
@@ -1206,7 +1209,7 @@ export function createDashboard(deps: DashboardDeps) {
     const cards = views.map(
       (g) => html`<section class="card server-card">
         <div class="server-top">${groupIcon(g)}<div><h2><a class="plain" href="/groups/${g.groupId}">${g.name}</a></h2>
-          <span class="muted">${g.isArmy ? html`${badge('Army', 'accent')} ` : html`${badge('Division', 'muted')} `}${g.info ? `${g.info.memberCount.toLocaleString('en-GB')} members` : ''}</span></div></div>
+          <span class="muted">${badge(groupKind(g), g.isArmy || g.isMain ? 'accent' : 'muted')} ${g.info ? `${g.info.memberCount.toLocaleString('en-GB')} members` : ''}</span></div></div>
         ${g.error ? html`<p class="flash bad">Couldn't read this group: ${g.error.slice(0, 120)}</p>` : ''}
         <div class="btn-row"><a class="btn" href="/groups/${g.groupId}">Open</a>${groupLinks(g)}</div>
       </section>`,
@@ -1323,7 +1326,7 @@ export function createDashboard(deps: DashboardDeps) {
       title: g.name,
       nav: 'groups',
       body: html`<header class="page-head"><div class="server-top">${groupIcon(g, 56)}<div><h1>${g.name}</h1>
-        <p class="sub">${g.isArmy ? 'Army group' : 'Division'}${g.info ? ` · ${g.info.memberCount.toLocaleString('en-GB')} members` : ''} · <a href="/groups">All groups</a>${g.isArmy ? html` · <a href="/promotions">Points-ladder promotions</a>` : ''}</p></div></div>
+        <p class="sub">${groupKind(g)}${g.info ? ` · ${g.info.memberCount.toLocaleString('en-GB')} members` : ''} · <a href="/groups">All groups</a>${g.isArmy ? html` · <a href="/promotions">Points-ladder promotions</a>` : ''}</p></div></div>
         <div class="actions">${groupLinks(g)}</div></header>
       ${g.error ? html`<div class="flash bad">Couldn't read this group from Roblox: ${g.error.slice(0, 160)}</div>` : ''}
       <nav class="tabs" aria-label="Group">${GROUP_TABS.map(([k, label]) => html`<a href="/groups/${groupId}?tab=${k}"${k === tab ? new Html(' aria-current="page"') : ''}>${label}</a>`)}</nav>

@@ -8,7 +8,7 @@ import {
 } from 'discord.js';
 import { COLOURS, ephemeral, esc, resolveRobloxTarget } from '../discord/helpers.js';
 import { standing } from '../game/points.js';
-import { changeRank, rankGuard } from '../game/promotions.js';
+import { assignable, changeRank, rankGuard } from '../game/promotions.js';
 import { Tier } from '../permissions/tiers.js';
 import { profileUrl } from '../roblox/users.js';
 import { defineCommand, type CommandContext } from '../types.js';
@@ -36,8 +36,8 @@ export default defineCommand({
     const typed = interaction.options.getFocused().toLowerCase();
     const roles = await services.groups.listRoles(services.config.roblox.armyGroupId);
     await interaction.respond(
-      roles
-        .filter((r) => r.rank > 0 && r.rank < 255 && (`${r.rank} ${r.name}`.toLowerCase().includes(typed)))
+      assignable(roles)
+        .filter((r) => `${r.rank} ${r.name}`.toLowerCase().includes(typed))
         .slice(0, 25)
         .map((r) => ({ name: `${r.rank} · ${r.name}`.slice(0, 100), value: String(r.id) })),
     );
